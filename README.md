@@ -36,3 +36,15 @@ ex)
 - README 작성
 - GIT 버전 관리 규칙 설정
 - LOG 작성 규칙 설정
+
+(26/01/15) 01. 임정환[구현 완료] 
+- stm32(STM32F429I-DISC1) 환경 세팅 완료
+    1. 프로그램
+        -> IDE : STM32 CubeIDE, v1.9.0 (https://www.st.com/en/development-tools/stm32cubeide.html)
+        -> tool : STM32 CubeMX, v6.16.1 (https://www.st.com/en/development-tools/stm32cubemx.html)
+
+    2. 출력 테스트 확인을 위한 .ioc 세팅
+        -> usart1 ==> Asynchronous 로 설정
+        -> Project Manager -> Code Generator -> Generate files -> Generate Peripheral ... 체크
+
+- 출력 테스트를 위한 코드 작성 후 정상 작동 확인함.
