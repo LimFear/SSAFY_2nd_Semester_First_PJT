@@ -59,4 +59,7 @@ ex)
     2. V_DD = 3.3V
     3. 라이브러리 "DHT sensor library" by Adafruit 를 설치함.
 
-
+(26/01/19) 01. 임정환[구현 완료] 
+- ESP32 끼리 CAN통신 연결 성공
+1. 하나는 DHT11 연결해서 송신하고, 나머지는 수신함
+2. RX => GPIO32, TX => GPIO33 으로 연결
