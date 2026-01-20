@@ -48,3 +48,13 @@ ex)
         -> Project Manager -> Code Generator -> Generate files -> Generate Peripheral ... 체크
 
 - 출력 테스트를 위한 코드 작성 후 정상 작동 확인함.
+
+(26/01/19) 01. 임정환[구현 완료] 
+- ESP32 개발 환경 설정
+    1. Arduino IDE v.2.3.7 설치
+    2. ESP32 DEV Module 설정 (필요시 드라이버 다운)
+
+- DHT11 테스트 완료
+    1. DATA 핀은 ESP32 GPIO16 번에 연결
+    2. V_DD = 3.3V
+
