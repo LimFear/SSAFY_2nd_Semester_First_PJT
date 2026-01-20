@@ -57,4 +57,6 @@ ex)
 - DHT11 테스트 완료
     1. DATA 핀은 ESP32 GPIO16 번에 연결
     2. V_DD = 3.3V
+    3. 라이브러리 "DHT sensor library" by Adafruit 를 설치함.
+
 
