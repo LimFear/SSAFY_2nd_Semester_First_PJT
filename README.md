@@ -59,7 +59,21 @@ ex)
     2. V_DD = 3.3V
     3. 라이브러리 "DHT sensor library" by Adafruit 를 설치함.
 
-(26/01/19) 01. 임정환[구현 완료] 
+(26/01/20) 01. 임정환[구현 완료] 
 - ESP32 끼리 CAN통신 연결 성공
 1. 하나는 DHT11 연결해서 송신하고, 나머지는 수신함
 2. RX => GPIO32, TX => GPIO33 으로 연결
+
+(26/01/21) 01. 임정환[구현 완료] 
+- STM32 <=> ESP32 CAN통신 연결 성공
+1. Polling 방식이며, Inturrupt 방식으로 변환 필요함
+2. ESP32 코드는 그대로 유지함
+3. STM32 .ioc 설정은 다음과 같다.
+    - Connenctivity CAN1을 Activated
+    - 그 다음, Parameter Settings에서 다음과 같다. (Baud Rate => 500,000 bit/s 목적)
+        - Prescaler = 2
+        - Time Quanta in Bit Segment 1(줄여서 a.k.a TQ) = 11
+        - TQ2 = 4
+
+    - PA11 = Rx, PA12 = Tx
+

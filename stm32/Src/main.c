@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "can.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -89,16 +91,19 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+  MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
-	HAL_Init();
-	SystemClock_Config();
-	MX_GPIO_Init();
-	MX_USART1_UART_Init();
 
-	int num = 0;
-	printf("start!");
+  if (SensorControl_CAN_Init(&hcan1) == false)
+  {
+	  printf("CAN init failed\r\n");
+	  Error_Handler();
+  }
 
+  	  float humidity = 0.0f;
+      float temperature = 0.0f;
 
+      printf("RX ready\r\n");
 
   /* USER CODE END 2 */
 
@@ -109,10 +114,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  SensorControl_Task();
+	if (SensorControl_DHT_TryRead(&humidity, &temperature) == true)
+	{
+	  printf("RX: H=%.1f%% T=%.1fC\r\n", humidity, temperature);
+	}
 
-	printf("log1, %d\n", num);
-	num++;
-	HAL_Delay(1000);
+
   }
   /* USER CODE END 3 */
 }
