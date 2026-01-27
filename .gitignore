@@ -16,3 +16,15 @@ pyvenv.cfg
 pip-selfcheck.json
 
 # End of https://www.toptal.com/developers/gitignore/api/venv
+
+
+# STM32CubeIDE
+.metadata/
+.settings/
+Debug/
+Release/
+*.launch
+
+# OS
+.DS_Store
+Thumbs.db

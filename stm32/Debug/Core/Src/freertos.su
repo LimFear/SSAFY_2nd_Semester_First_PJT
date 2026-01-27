@@ -1,7 +1,0 @@
-../Core/Inc/decision.h:29:24:u16_from_le	24	static
-../Core/Inc/decision.h:36:19:protocol_parse_dht_x10	32	static
-../Core/Src/freertos.c:90:6:MX_FREERTOS_Init	120	static
-../Core/Src/freertos.c:164:6:StartDefaultTask	16	static
-../Core/Src/freertos.c:183:13:CanRxTask	64	static
-../Core/Src/freertos.c:248:13:ControlTask	96	static
-../Core/Src/freertos.c:382:13:CanTxTask	72	static
