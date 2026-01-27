@@ -90,3 +90,95 @@ ex)
     - 센서 데이터를 인터럽트 방식으로 받으며, 이에 따라 제어를 판단하여 control에다 신호를 전송한다. 서보 모터는 레벨 데이터를 전송하여 30도일때 Level1, 35 = level2, 이런 식으로 순차적으로 전송한다.
 
 3. STM32의 전체 코드를 push함
+
+(26/01/27) 01. 김영진[구현 완료] 
+0. CDS 광조도센서 > ESP센서부 > STM게이트웨이 > ESP동작부 > LED(내부)로 구현 완료
+    - STMCubeIDE(v1.19) / ESP-IDF로 작업함.
+    - [예정] LED 외부 모듈로 구현하는 것은 아직 진행중
+    - [예정] 기존 온습도제어 로직과 코드/핀 번호 충돌이 예상되어 merge에서 핀 번호 및 로직 통합 예정
+
+1. ESP센서부
+    - 핀 번호 (Pin Assignment)
+    | 기능 | 핀 번호 (GPIO) | 설명 |
+    | :--- | :---: | :--- |
+    | **CAN TX** | 33 | TWAI(CAN) 데이터 송신 |
+    | **CAN RX** | 32 | TWAI(CAN) 데이터 수신 |
+    | **ADC Sensor** | 34 | 조도 센서 (ADC1_CH6) 입력 핀 |
+
+    ---
+    - 데이터 패킷 설명 (CAN Data Protocol)
+        - **ID**: `0x101`
+        - **DLC**: `8` (실제 데이터는 앞 2 bytes에 할당)
+        - **Data Payload**:
+        | Byte Index | 역할 | 값 범위 | 설명 |
+        | :---: | :--- | :---: | :--- |
+        | `Byte 0` | **ADC High** | 0 ~ 15 | ADC Raw 데이터의 상위 8비트 |
+        | `Byte 1` | **ADC Low** | 0 ~ 255 | ADC Raw 데이터의 하위 8비트 |
+        | `Byte 2~7` | **Reserved** | 0 | 예약됨 (미사용 데이터 영역) |
+
+        ---
+    - 세부 동작 방법
+        - 조도 센서를 **200ms 주기**로 ADC(12-bit) 계측
+        - 측정 데이터를 CAN 메시지로 송신
+        - CAN 통신 속도: **500 kbps (TWAI, Normal Mode)**
+
+2. STM게이트웨이
+    - 핀 번호 (Pin Assignment)
+    | 기능 | 핀 명칭 (Port/Pin) | 설명 |
+    | :--- | :---: | :--- |
+    | **CAN1 TX** | PA12 | CAN 버스 데이터 송신 |
+    | **CAN1 RX** | PA11 | CAN 버스 데이터 수신 |
+    | **UART1 TX** | PA9 | 디버그 로그 출력 (Terminal) |
+    | **UART1 RX** | PA10 | 디버그 명령 수신 |
+
+    ---
+    - 데이터 패킷 설명 (CAN Data Protocol)
+        - **수신 (From ESP Sensor)**:
+            - **ID**: `0x101`
+            - **Data**: `rxData[0]`(High) + `rxData[1]`(Low) 조합으로 조도값 복원
+        - **송신 (To ESP Actuator)**:
+            - **ID**: `0x201`
+            - **DLC**: `8`
+            - **Data Payload**:
+            | Byte Index | 역할 | 값 범위 | 설명 |
+            | :---: | :--- | :---: | :--- |
+            | `Byte 0` | **LED CMD** | 0 or 1 | 0: OFF / 1: ON |
+            | `Byte 1~7` | **Padding** | 0 | 0으로 초기화하여 송신 |
+
+        ---
+    - 세부 동작 방법
+        - CAN 인터럽트 기반 메시지 수신
+        - 센서 메시지(`0x101`)에서 조도값(16-bit) 복원
+        - 임계값(1000) 기준 제어 판단
+        - 초과: LED ON
+        - 이하: LED OFF
+        - 제어 명령을 CAN 메시지(`0x201`)로 송신
+        - UART를 통한 실시간 상태 로그 출력
+
+3. ESP동작부
+    - 핀 번호 (Pin Assignment)
+    | 기능 | 핀 번호 (GPIO) | 설명 |
+    | :--- | :---: | :--- |
+    | **CAN TX** | 33 | TWAI(CAN) 데이터 송신 |
+    | **CAN RX** | 32 | TWAI(CAN) 데이터 수신 |
+    | **LED RED** | 4(지금은 내부 led핀 사용) | RGB LED - Red 제어 핀 |
+    | **LED GREEN** | 5 | RGB LED - Green 제어 핀 |
+    | **LED BLUE** | 18 | RGB LED - Blue 제어 핀 |
+
+    ---
+    -  데이터 패킷 설명 (CAN Data Protocol)
+        - **ID**: `0x201`
+        - **DLC**: `3` (또는 8 bytes 사용 시 첫 3 bytes만 유효)
+        - **Data Payload**:
+        | Byte Index | 역할 | 값 범위 | 설명 |
+        | :---: | :--- | :---: | :--- |
+        | `Byte 0` | **Red** 채널 | 0 or 1 | 0: OFF / 1: ON |
+        | `Byte 1` | **Green** 채널 | 0 or 1 | 0: OFF / 1: ON |
+        | `Byte 2` | **Blue** 채널 | 0 or 1 | 0: OFF / 1: ON |
+
+        ---
+    - 세부 동작 방법
+        - CAN 메시지 수신 대기
+        - 액츄에이터 전용 ID(`0x201`) 메시지만 처리
+        - 수신된 데이터에 따라 RGB LED 제어
+        - 동작 상태를 로그로 출력
