@@ -105,3 +105,26 @@ ex)
 - URL을 인터넷에 "http://ip번호" 작성 후 접속. 그럼 mqtt.c 파일 안에 있는 html이 열림.
 - 인터넷 연결 확인 후, ON, OFF 버튼 눌러서 확인할 것.
 
+(26/01/30) 01. 임정환[구현 실패] 
+- SPI1 통신 설정은 다음과 같다.
+    1. PA4 - ESP32_SPI_CS
+    2. PA5 - ESP32_SPI_SCK
+    3. PA6 - ESP32_SPI_MISO
+    4. PA7 - ESP32_SPI_MOSI
+    5. SPI1 - global interrupt Enabled 실행
+    6. 그 외의 값들은 Default
+
+- FREERTOS 설정은 사진을 참고해서 설정한다 (freertos.c 참고).
+![alt text](image.png)
+![alt text](image-1.png)
+
+- 현재 상황
+    1. MQTT 로 태블릿과 mqtt 보드 연결 완료
+    2. stm32와 센서, 동작부 연결 완료
+    3. mqtt가 auto flag를 전송하면, freertos를 통해 자동적으로 동작하는 알고리즘 실행
+    4. mqtt가 On, Off flag를 전송하면 우선적으로 동작하도록 설계했음.
+    5. stm32에서 센서 데이터 받아오는 것을 로그로 확인함
+    6. mqtt html에서 동작 flag(On, Off, AUTO로 변경했는지 확인하는 로그)가 제대로 출력됨을 확인함
+
+- 확인 필요한 상황
+1. mqtt 보드와 stm32 간의 통신 확인 필요

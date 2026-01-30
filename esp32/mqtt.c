@@ -1,33 +1,320 @@
+#include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <SPI.h>
 #include <WebServer.h>
 
-/* ===== Wi-Fi ===== */
-const char* ssid = "e^(ix) = k cosx + ki sinx, k = ?"; //개인 와이파이 이름 입력
-const char* password = "haha0223"; //개인 와이파이 비밀번호 입력
+/* =========================
+ * WiFi / MQTT 설정
+ * ========================= */
+static const char* WIFI_SSID = "e^(ix) = k cosx + ki sinx, k = ?";
+static const char* WIFI_PASS = "haha5123";
 
-/* ===== MQTT Broker (EMQX Public) =====
-   Host: broker.emqx.io
-   TCP: 1883
-   WS:  8083
-   WSS: 8084  (browser uses this)  path: /mqtt
-*/
-const char* MQTT_HOST = "broker.emqx.io";
-const uint16_t MQTT_PORT = 1883;
+static const char* MQTT_HOST = "broker.emqx.io";
+static const uint16_t MQTT_PORT = 1883;
 
-/* ===== Topics ===== */
-const char* TOPIC_CMD = "Lim/esp32/led27/cmd/haha5123";
-const char* TOPIC_STATE = "Lim/esp32/led27/state/haha5123";
+/* =========================
+ * SPI 배선(프로젝트에 맞게 수정)
+ * ========================= */
+static const int PIN_SPI_CS = 5;
+static const int PIN_SPI_SCK = 18;
+static const int PIN_SPI_MISO = 19;
+static const int PIN_SPI_MOSI = 23;
 
-/* ===== GPIO ===== */
-constexpr uint8_t LED_GPIO = 27;
+/* =========================
+ * SPI 프레임(STM32가 이대로 파싱해야 함)
+ * [0]=SOF 0xA5
+ * [1]=VER 0x01
+ * [2]=WIPER_MODE (0=AUTO,1=ON,2=OFF, 0xFF=NOCHANGE)
+ * [3]=HIGH_MODE  (0=AUTO,1=ON,2=OFF, 0xFF=NOCHANGE)
+ * [4]=CRC XOR([0..3])
+ * [5]=EOF 0x5A
+ * ========================= */
+static const uint8_t SPI_FRAME_SOF = 0xA5;
+static const uint8_t SPI_FRAME_VER = 0x01;
+static const uint8_t SPI_FRAME_EOF = 0x5A;
 
-/* ===== Network Clients ===== */
+static const uint8_t SPI_MODE_NOCHANGE = 0xFF;
+
+static const uint8_t MODE_AUTO = 0;
+static const uint8_t MODE_ON = 1;
+static const uint8_t MODE_OFF = 2;
+
+/* 토픽 베이스 */
+static const char* TOPIC_BASE = "Lim/haha5123/esp32";
+
+/* =========================
+ * 전역 상태
+ * ========================= */
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 WebServer webServer(80);
 
-/* ===== Web Page (served by ESP32) ===== */
+static uint8_t g_wiperMode = MODE_AUTO;
+static uint8_t g_highMode = MODE_AUTO;
+
+static char g_deviceId[16];
+
+static char g_topicWiperCmd[96];
+static char g_topicHighCmd[96];
+static char g_topicWiperState[96];
+static char g_topicHighState[96];
+static char g_topicOnline[96];
+
+/* =========================
+ * 유틸
+ * ========================= */
+static uint8_t calc_crc_xor_4(const uint8_t* bytes4)
+{
+    uint8_t crc = 0;
+    crc ^= bytes4[0];
+    crc ^= bytes4[1];
+    crc ^= bytes4[2];
+    crc ^= bytes4[3];
+    return crc;
+}
+
+static const char* mode_to_string(uint8_t mode)
+{
+    if (mode == MODE_AUTO) {
+        return "AUTO";
+    }
+    if (mode == MODE_ON) {
+        return "ON";
+    }
+    if (mode == MODE_OFF) {
+        return "OFF";
+    }
+    return "UNKNOWN";
+}
+
+static bool parse_mode_payload(const char* payload, uint8_t* outMode)
+{
+    if (payload == NULL) {
+        return false;
+    }
+    if (outMode == NULL) {
+        return false;
+    }
+
+    if (strcmp(payload, "AUTO") == 0) {
+        *outMode = MODE_AUTO;
+        return true;
+    }
+
+    if (strcmp(payload, "ON") == 0) {
+        *outMode = MODE_ON;
+        return true;
+    }
+
+    if (strcmp(payload, "OFF") == 0) {
+        *outMode = MODE_OFF;
+        return true;
+    }
+
+    return false;
+}
+
+/* =========================
+ * SPI 송신
+ * ========================= */
+static void spi_send_modes(uint8_t wiperModeOrNoChange, uint8_t highModeOrNoChange)
+{
+    uint8_t tx[6];
+    uint8_t rx[6];
+
+    tx[0] = SPI_FRAME_SOF;
+    tx[1] = SPI_FRAME_VER;
+    tx[2] = wiperModeOrNoChange;
+    tx[3] = highModeOrNoChange;
+    tx[4] = calc_crc_xor_4(tx);
+    tx[5] = SPI_FRAME_EOF;
+
+    SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(PIN_SPI_CS, LOW);
+    delayMicroseconds(2);
+    SPI.transferBytes(tx, rx, 6);
+    delayMicroseconds(2);
+    digitalWrite(PIN_SPI_CS, HIGH);
+    SPI.endTransaction();
+}
+
+/* =========================
+ * MQTT publish
+ * ========================= */
+static void mqtt_publish_state()
+{
+    mqttClient.publish(g_topicWiperState, mode_to_string(g_wiperMode), true);
+    mqttClient.publish(g_topicHighState, mode_to_string(g_highMode), true);
+}
+
+/* =========================
+ * 모드 적용(중복 제거)
+ * ========================= */
+static void apply_wiper_mode(uint8_t newMode)
+{
+    if (g_wiperMode == newMode) {
+        return;
+    }
+
+    g_wiperMode = newMode;
+    Serial.printf("[APPLY] WIPER=%s\n", mode_to_string(g_wiperMode));
+
+    spi_send_modes(g_wiperMode, SPI_MODE_NOCHANGE);
+    mqtt_publish_state();
+}
+
+static void apply_high_mode(uint8_t newMode)
+{
+    if (g_highMode == newMode) {
+        return;
+    }
+
+    g_highMode = newMode;
+    Serial.printf("[APPLY] HIGH=%s\n", mode_to_string(g_highMode));
+
+    spi_send_modes(SPI_MODE_NOCHANGE, g_highMode);
+    mqtt_publish_state();
+}
+
+/* =========================
+ * MQTT callback
+ * ========================= */
+static void mqtt_callback(char* topic, byte* payload, unsigned int length)
+{
+    if (topic == NULL) {
+        return;
+    }
+    if (payload == NULL) {
+        return;
+    }
+
+    char message[32];
+    unsigned int copyLength = length;
+
+    if (copyLength >= sizeof(message)) {
+        copyLength = sizeof(message) - 1;
+    }
+
+    memcpy(message, payload, copyLength);
+    message[copyLength] = '\0';
+
+    for (unsigned int index = 0; index < copyLength; index++) {
+        char c = message[index];
+        if (c >= 'a' && c <= 'z') {
+            message[index] = (char)(c - 'a' + 'A');
+        }
+    }
+
+    uint8_t newMode = MODE_AUTO;
+    bool ok = parse_mode_payload(message, &newMode);
+    if (ok == false) {
+        Serial.printf("[MQTT] invalid payload: %s\n", message);
+        return;
+    }
+
+    if (strcmp(topic, g_topicWiperCmd) == 0) {
+        Serial.printf("[MQTT] WIPER=%s\n", mode_to_string(newMode));
+        apply_wiper_mode(newMode);
+        return;
+    }
+
+    if (strcmp(topic, g_topicHighCmd) == 0) {
+        Serial.printf("[MQTT] HIGH=%s\n", mode_to_string(newMode));
+        apply_high_mode(newMode);
+        return;
+    }
+}
+
+/* =========================
+ * 토픽 생성
+ * ========================= */
+static void build_device_id_from_mac()
+{
+    uint64_t mac = ESP.getEfuseMac();
+    uint32_t low24 = (uint32_t)(mac & 0xFFFFFF);
+    snprintf(g_deviceId, sizeof(g_deviceId), "%06X", (unsigned)low24);
+}
+
+static void build_topics()
+{
+    snprintf(g_topicWiperCmd, sizeof(g_topicWiperCmd), "%s/wiper/cmd/%s", TOPIC_BASE, g_deviceId);
+    snprintf(g_topicHighCmd, sizeof(g_topicHighCmd), "%s/high/cmd/%s", TOPIC_BASE, g_deviceId);
+
+    snprintf(g_topicWiperState, sizeof(g_topicWiperState), "%s/wiper/state/%s", TOPIC_BASE, g_deviceId);
+    snprintf(g_topicHighState, sizeof(g_topicHighState), "%s/high/state/%s", TOPIC_BASE, g_deviceId);
+
+    snprintf(g_topicOnline, sizeof(g_topicOnline), "%s/online/%s", TOPIC_BASE, g_deviceId);
+
+    Serial.println("[TOPICS]");
+    Serial.println(g_topicWiperCmd);
+    Serial.println(g_topicHighCmd);
+    Serial.println(g_topicWiperState);
+    Serial.println(g_topicHighState);
+    Serial.println(g_topicOnline);
+}
+
+/* =========================
+ * WiFi/MQTT connect
+ * ========================= */
+static void wifi_connect()
+{
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    Serial.print("WiFi connecting");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(300);
+        Serial.print(".");
+    }
+    Serial.println();
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+}
+
+static void mqtt_connect()
+{
+    mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+    mqttClient.setCallback(mqtt_callback);
+
+    while (mqttClient.connected() == false)
+    {
+        String clientId = "esp32-mqtt-";
+        clientId += g_deviceId;
+
+        bool connected = mqttClient.connect(
+            clientId.c_str(),
+            g_topicOnline,
+            1,
+            true,
+            "offline"
+        );
+
+        if (connected) {
+            Serial.println("[MQTT] CONNECTED");
+            Serial.print("[MQTT] clientId="); Serial.println(clientId);
+            Serial.print("[MQTT] broker="); Serial.print(MQTT_HOST);
+            Serial.print(":"); Serial.println(MQTT_PORT);
+            break;
+        }
+
+        Serial.print("[MQTT] connect fail, state=");
+        Serial.println(mqttClient.state());
+        delay(500);
+    }
+
+    mqttClient.subscribe(g_topicWiperCmd);
+    mqttClient.subscribe(g_topicHighCmd);
+
+    mqttClient.publish(g_topicOnline, "online", true);
+    mqtt_publish_state();
+}
+
+/* =========================
+ * 정환님 기존 HTML (JS만 최소 수정)
+ *  - 버튼 누르면 /api/set 로 명령 전송
+ *  - 1초마다 /api/state 로 현재 상태 동기화
+ * ========================= */
 const char INDEX_HTML[] PROGMEM = R"HTML(
 <!doctype html>
 <html lang="ko">
@@ -47,8 +334,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       --shadow:0 0 0 2px var(--neon-dim), 0 0 18px rgba(102,243,220,.10);
       --shadow-strong:0 0 0 2px rgba(102,243,220,.95), 0 0 26px rgba(102,243,220,.28);
       --radius:14px;
-
-      /* 하단 패드 높이(기기마다 자동 스케일) */
       --padTopH: clamp(66px, 12vh, 120px);
       --padBtnH:  clamp(70px, 13vh, 132px);
       --gap: clamp(8px, 1.2vh, 14px);
@@ -78,17 +363,15 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       .portraitLock{ display:flex; }
     }
 
-    /* ===== 전체 레이아웃: 하단 영역(화살표+STOP) 확실히 확보 ===== */
     .app{
       height:100vh;
       width:100vw;
       padding: clamp(8px, 1.4vh, 14px) clamp(10px, 1.8vw, 18px);
       display:grid;
-      grid-template-rows: 30vh 22vh 48vh; /* TOP / MID / BOTTOM */
+      grid-template-rows: 30vh 22vh 48vh;
       gap: var(--gap);
     }
 
-    /* ===== TOP: 5개 컨트롤 ===== */
     .topRow{
       display:grid;
       grid-template-columns: repeat(5, 1fr);
@@ -105,7 +388,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     }
 
     .controlGroup.simple{
-      grid-template-rows: 1fr; /* Left/Right: 스위치 없음 */
+      grid-template-rows: 1fr;
     }
 
     .iconCard{
@@ -122,7 +405,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       min-height:0;
     }
 
-    /* Left/Right는 박스 자체가 버튼 */
     .iconCardBtn{
       border:2px solid var(--neon-dim);
       background:transparent;
@@ -168,7 +450,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     .strokeNeon{ stroke:var(--neon); }
     .fillNeon{ fill:var(--neon); }
 
-    /* ===== ON/OFF + AUTO ===== */
     .switchStack{
       display:grid;
       grid-template-rows: auto auto;
@@ -221,7 +502,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     }
     .autoBtn:active{ transform: translateY(1px); }
 
-    /* ===== MID: 온습도 + Reset ===== */
     .midRow{
       display:grid;
       grid-template-columns: 1fr;
@@ -264,7 +544,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     }
     .resetBtn:active{ box-shadow: var(--shadow-strong); transform: translateY(1px); }
 
-    /* ===== BOTTOM: 화살표 + STOP (옆 배치) ===== */
     .bottomRow{
       display:grid;
       grid-template-columns: 1fr clamp(170px, 22vw, 260px);
@@ -279,7 +558,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       grid-template-rows: auto auto;
       gap: clamp(10px, 1.4vh, 14px);
       justify-items: center;
-      align-items: start; /* 위로 올려서 잘림 방지 */
+      align-items: start;
       min-height:0;
       padding-top: 2px;
     }
@@ -335,7 +614,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       background: rgba(102,243,220,.08);
     }
 
-    /* STOP (하단 오른쪽) */
     .stopBtn{
       width: 100%;
       aspect-ratio: 1 / 1;
@@ -373,7 +651,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       text-shadow: 0 0 14px rgba(102,243,220,.20);
     }
     .stopBtn:active{ box-shadow: var(--shadow-strong); transform: translateY(1px); }
-
   </style>
 </head>
 
@@ -387,10 +664,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
   <div class="app">
 
-    <!-- ===== TOP ===== -->
     <div class="topRow">
 
-      <!-- Left (박스 자체 버튼) -->
       <div class="controlGroup simple" data-group="left">
         <button class="iconCard iconCardBtn" type="button" data-box="left" aria-label="Left">
           <div class="iconInner">
@@ -402,7 +677,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         </button>
       </div>
 
-      <!-- Wiper (ON/OFF + AUTO) -->
       <div class="controlGroup" data-group="wiper">
         <div class="iconCard">
           <div class="iconInner">
@@ -425,7 +699,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         </div>
       </div>
 
-      <!-- Emer (ON/OFF + AUTO) -->
       <div class="controlGroup simple" data-group="emer">
         <button class="iconCard iconCardBtn" type="button" data-box="emer" aria-label="Emergency">
           <div class="iconInner">
@@ -439,8 +712,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         </button>
       </div>
 
-
-      <!-- High (ON/OFF + AUTO) -->
       <div class="controlGroup" data-group="high">
         <div class="iconCard">
           <div class="iconInner">
@@ -465,7 +736,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         </div>
       </div>
 
-      <!-- Right (박스 자체 버튼) -->
       <div class="controlGroup simple" data-group="right">
         <button class="iconCard iconCardBtn" type="button" data-box="right" aria-label="Right">
           <div class="iconInner">
@@ -479,19 +749,17 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     </div>
 
-    <!-- ===== MID ===== -->
     <div class="midRow">
       <div class="infoBlock">
         <button class="resetBtn" type="button">Reset<br/>Rotation</button>
 
         <div class="readouts">
-          <div>Temperature: <b>27°C</b></div>
-          <div>Humidity: <b>49%</b></div>
+          <div>Temperature: <b id="tempText">--°C</b></div>
+          <div>Humidity: <b id="humText">--%</b></div>
         </div>
       </div>
     </div>
 
-    <!-- ===== BOTTOM: 화살표 + STOP ===== -->
     <div class="bottomRow">
 
       <div class="pad" aria-label="Arrow Pad">
@@ -555,13 +823,80 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     element.classList.toggle('active', Boolean(on));
   }
 
-  // ===== 1) AUTO 기본값 =====
+  // ===== [추가] ESP32로 명령 보내기 =====
+  async function sendMode(target, state) {
+    // state: 'auto' | 'on' | 'off'
+    let mode = 'AUTO';
+    if (state === 'on') mode = 'ON';
+    if (state === 'off') mode = 'OFF';
+
+    try {
+      await fetch('/api/set?target=' + encodeURIComponent(target) + '&mode=' + encodeURIComponent(mode));
+    } catch (e) {
+      // 네트워크 끊겨도 UI가 멈추지 않게 무시
+    }
+  }
+
+  // ===== [추가] 서버 상태 동기화 =====
+  function setGroupUI(groupEl, state) {
+    const segmentButtons = groupEl.querySelectorAll('.segBtn');
+    const autoButton = groupEl.querySelector('.autoBtn');
+    if (!autoButton) return;
+
+    segmentButtons.forEach(button => button.classList.remove('active'));
+    autoButton.classList.remove('active');
+
+    if (state === 'auto') {
+      autoButton.classList.add('active');
+      return;
+    }
+
+    segmentButtons.forEach(button => {
+      if (button.dataset.seg === state) {
+        button.classList.add('active');
+      }
+    });
+  }
+
+  async function refreshFromServer(){
+    try{
+      const r = await fetch('/api/state');
+      const j = await r.json();
+
+      // wiper/high 상태 반영
+      const wiperGroup = document.querySelector('.controlGroup[data-group="wiper"]');
+      const highGroup  = document.querySelector('.controlGroup[data-group="high"]');
+
+      if (wiperGroup) {
+        const state = (j.wiper || 'AUTO').toLowerCase(); // 'auto'/'on'/'off'
+        setGroupUI(wiperGroup, state);
+      }
+
+      if (highGroup) {
+        const state = (j.high || 'AUTO').toLowerCase();
+        setGroupUI(highGroup, state);
+      }
+
+      // (선택) 온습도 표시: 지금은 서버가 값 안 주면 -- 유지
+      if (typeof j.temp === 'number') {
+        document.getElementById('tempText').textContent = j.temp.toFixed(1) + '°C';
+      }
+      if (typeof j.hum === 'number') {
+        document.getElementById('humText').textContent = j.hum.toFixed(1) + '%';
+      }
+    } catch(e) {
+      // 무시
+    }
+  }
+
+  // ===== 1) AUTO 기본값 + [추가] 클릭 시 ESP32로 전송 =====
   document.querySelectorAll('.controlGroup').forEach(group => {
+    const groupName = group.dataset.group || '';
     const segmentButtons = group.querySelectorAll('.segBtn');
     const autoButton = group.querySelector('.autoBtn');
 
     if (!autoButton) {
-      return; // AUTO가 없는 그룹(Left/Right/Emer)은 스킵
+      return;
     }
 
     function clearAll() {
@@ -574,14 +909,18 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
       if (state === 'auto') {
         autoButton.classList.add('active');
-        return;
+      } else {
+        segmentButtons.forEach(button => {
+          if (button.dataset.seg === state) {
+            button.classList.add('active');
+          }
+        });
       }
 
-      segmentButtons.forEach(button => {
-        if (button.dataset.seg === state) {
-          button.classList.add('active');
-        }
-      });
+      // [추가] wiper/high면 서버로 명령 전송
+      if (groupName === 'wiper' || groupName === 'high') {
+        sendMode(groupName, state);
+      }
     }
 
     segmentButtons.forEach(button => {
@@ -590,7 +929,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     autoButton.addEventListener('click', () => setState('auto'));
 
-    // 기본값: AUTO
     setState('auto');
   });
 
@@ -600,17 +938,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   const emerButton  = document.querySelector('[data-box="emer"]');
 
   function isHazardOn() {
-    if (!emerButton) {
-      return false;
-    }
+    if (!emerButton) return false;
     return emerButton.classList.contains('active');
   }
 
-  // ===== 2) Left/Right 상호배타 =====
-  function setTurnSignal(side) { // 'left' | 'right' | 'off'
-    if (!leftButton || !rightButton) {
-      return;
-    }
+  function setTurnSignal(side) {
+    if (!leftButton || !rightButton) return;
 
     if (side === 'left') {
       setActive(leftButton, true);
@@ -624,34 +957,21 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       return;
     }
 
-    // off
     setActive(leftButton, false);
     setActive(rightButton, false);
   }
 
-  // ===== 3) Emergency(비상등): ON이면 Left+Right 둘 다 ON =====
   function setHazard(on) {
-    if (!emerButton) {
-      return;
-    }
+    if (!emerButton) return;
 
     setActive(emerButton, on);
-
-    if (leftButton) {
-      setActive(leftButton, on);
-    }
-    if (rightButton) {
-      setActive(rightButton, on);
-    }
+    if (leftButton)  setActive(leftButton, on);
+    if (rightButton) setActive(rightButton, on);
   }
 
-  // ===== 정책 B: 비상등 ON 동안 Left/Right 클릭 무시 =====
   if (leftButton) {
     leftButton.addEventListener('click', () => {
-      if (isHazardOn()) {
-        return; // 무시(비상등 유지)
-      }
-
+      if (isHazardOn()) return;
       const wantOn = !leftButton.classList.contains('active');
       setTurnSignal(wantOn ? 'left' : 'off');
     });
@@ -659,10 +979,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
   if (rightButton) {
     rightButton.addEventListener('click', () => {
-      if (isHazardOn()) {
-        return; // 무시(비상등 유지)
-      }
-
+      if (isHazardOn()) return;
       const wantOn = !rightButton.classList.contains('active');
       setTurnSignal(wantOn ? 'right' : 'off');
     });
@@ -675,7 +992,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     });
   }
 
-  // ===== 눌림 효과(pressed) =====
   document.querySelectorAll('.iconCardBtn').forEach(button => {
     button.addEventListener('pointerdown', (event) => {
       event.preventDefault();
@@ -688,7 +1004,6 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     });
   });
 
-  // ===== 화살표 패드: 누르고 있는 동안만 강조 =====
   document.querySelectorAll('.padBtn').forEach(button => {
     button.addEventListener('pointerdown', (event) => {
       event.preventDefault();
@@ -700,131 +1015,130 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       button.addEventListener(eventName, () => button.classList.remove('pressed'));
     });
   });
+
+  // [추가] 1초마다 서버 상태 동기화
+  refreshFromServer();
+  setInterval(refreshFromServer, 1000);
 </script>
 
 </body>
 </html>
 )HTML";
 
-
-String buildIndexHtml() {
-    return String(FPSTR(INDEX_HTML));
+/* =========================
+ * Web API
+ * ========================= */
+static void web_handle_root()
+{
+    // 큰 HTML은 send_P로 전송해야 RAM이 안전합니다.
+    webServer.send_P(200, "text/html", INDEX_HTML);
 }
 
+static void web_handle_state()
+{
+    String json = "{";
+    json += "\"deviceId\":\""; json += g_deviceId; json += "\",";
+    json += "\"topicBase\":\""; json += TOPIC_BASE; json += "\",";
+    json += "\"wiper\":\""; json += mode_to_string(g_wiperMode); json += "\",";
+    json += "\"high\":\"";  json += mode_to_string(g_highMode);  json += "\"";
+    // temp/hum은 현재 mqtt 노드가 보유하는 값이 없으므로 일부러 안 넣었습니다.
+    // 필요하면 추후 json += ",\"temp\":...,\"hum\":..." 형태로 확장하면 됩니다.
+    json += "}";
 
-void publishState(bool isOn) {
-    const char* msg = isOn ? "ON" : "OFF";
-    mqttClient.publish(TOPIC_STATE, msg, false);
+    webServer.send(200, "application/json", json);
 }
 
-void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-    String message;
-    for (unsigned int i = 0; i < length; i++) {
-        message += (char)payload[i];
+static void web_handle_set()
+{
+    if (webServer.hasArg("target") == false) {
+        webServer.send(400, "text/plain", "missing target");
+        return;
     }
-    message.trim();
 
-    if (String(topic) == TOPIC_CMD) {
-        if (message == "ON") {
-            digitalWrite(LED_GPIO, HIGH);
-            publishState(true);
-        }
-        else if (message == "OFF") {
-            digitalWrite(LED_GPIO, LOW);
-            publishState(false);
-        }
+    if (webServer.hasArg("mode") == false) {
+        webServer.send(400, "text/plain", "missing mode");
+        return;
     }
+
+    String target = webServer.arg("target");
+    String modeStr = webServer.arg("mode");
+    modeStr.toUpperCase();
+
+    uint8_t newMode = MODE_AUTO;
+    bool ok = parse_mode_payload(modeStr.c_str(), &newMode);
+    if (ok == false) {
+        webServer.send(400, "text/plain", "invalid mode (AUTO/ON/OFF)");
+        return;
+    }
+
+    if (target == "wiper") {
+        apply_wiper_mode(newMode);
+        webServer.send(200, "text/plain", "OK");
+        return;
+    }
+
+    if (target == "high") {
+        apply_high_mode(newMode);
+        webServer.send(200, "text/plain", "OK");
+        return;
+    }
+
+    webServer.send(400, "text/plain", "invalid target (wiper/high)");
 }
 
-void connectWiFi() {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-
-    Serial.print("WiFi connecting");
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println();
-    Serial.print("WiFi connected. IP: ");
-    Serial.println(WiFi.localIP());
-}
-
-void connectMqtt() {
-    mqttClient.setServer(MQTT_HOST, MQTT_PORT);
-    mqttClient.setCallback(onMqttMessage);
-
-    while (!mqttClient.connected()) {
-        String clientId = "esp32_" + String((uint32_t)ESP.getEfuseMac(), HEX);
-        Serial.print("MQTT connecting... clientId=");
-        Serial.println(clientId);
-
-        if (mqttClient.connect(clientId.c_str())) {
-            Serial.println("MQTT connected.");
-            mqttClient.subscribe(TOPIC_CMD);
-            // 초기 상태 송신
-            publishState(digitalRead(LED_GPIO) == HIGH);
-        }
-        else {
-            Serial.print("MQTT connect failed, rc=");
-            Serial.println(mqttClient.state());
-            delay(1000);
-        }
-    }
-}
-
-void setupWebServer() {
-    webServer.on("/", []() {
-        webServer.send(200, "text/html; charset=utf-8", buildIndexHtml());
-        });
-
-    webServer.on("/cmd", HTTP_GET, []() {
-        if (!webServer.hasArg("value")) {
-            webServer.send(400, "text/plain; charset=utf-8", "value 파라미터 없음");
-            return;
-        }
-
-        String cmd = webServer.arg("value");
-        cmd.trim();
-
-        if (cmd == "ON") {
-            digitalWrite(LED_GPIO, HIGH);
-            publishState(true);
-            webServer.send(200, "text/plain; charset=utf-8", "OK: ON");
-            return;
-        }
-
-        if (cmd == "OFF") {
-            digitalWrite(LED_GPIO, LOW);
-            publishState(false);
-            webServer.send(200, "text/plain; charset=utf-8", "OK: OFF");
-            return;
-        }
-
-        webServer.send(400, "text/plain; charset=utf-8", "지원하지 않는 value: " + cmd);
-        });
-
+static void web_setup_routes()
+{
+    webServer.on("/", HTTP_GET, web_handle_root);
+    webServer.on("/api/state", HTTP_GET, web_handle_state);
+    webServer.on("/api/set", HTTP_GET, web_handle_set);
     webServer.begin();
-    Serial.println("WebServer started on port 80");
+    Serial.println("[WEB] started on port 80");
 }
 
-void setup() {
+/* =========================
+ * setup / loop
+ * ========================= */
+void setup()
+{
     Serial.begin(115200);
+    delay(300);
 
-    pinMode(LED_GPIO, OUTPUT);
-    digitalWrite(LED_GPIO, LOW);
+    pinMode(PIN_SPI_CS, OUTPUT);
+    digitalWrite(PIN_SPI_CS, HIGH);
+    SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SPI_CS);
 
-    connectWiFi();
-    setupWebServer();
+    build_device_id_from_mac();
+    build_topics();
 
-    connectMqtt();
+    wifi_connect();
+    mqtt_connect();
+
+    web_setup_routes();
+
+    // 부팅 시 1회 동기화
+    spi_send_modes(g_wiperMode, g_highMode);
 }
 
-void loop() {
+void loop()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        wifi_connect();
+    }
+
+    if (mqttClient.connected() == false) {
+        mqtt_connect();
+    }
+
+    mqttClient.loop();
     webServer.handleClient();
 
-    if (!mqttClient.connected()) {
-        connectMqtt();
+    // 유실 대비 주기적 SPI 동기화(선택)
+    static uint32_t lastSyncMs = 0;
+    uint32_t nowMs = millis();
+    if ((nowMs - lastSyncMs) >= 2000) {
+        lastSyncMs = nowMs;
+        spi_send_modes(g_wiperMode, g_highMode);
     }
-    mqttClient.loop();
+
+    delay(5);
 }

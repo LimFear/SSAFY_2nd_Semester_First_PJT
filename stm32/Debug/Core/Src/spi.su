@@ -1,0 +1,8 @@
+../Core/Src/spi.c:34:16:spi_calc_crc_xor4	24	static
+../Core/Src/spi.c:44:6:SpiCtrl_SetRxQueue	16	static
+../Core/Src/spi.c:49:19:SpiCtrl_StartRxIT	16	static
+../Core/Src/spi.c:61:6:MX_SPI1_Init	8	static
+../Core/Src/spi.c:80:6:HAL_SPI_MspInit	48	static
+../Core/Src/spi.c:111:6:HAL_SPI_MspDeInit	16	static
+../Core/Src/spi.c:123:6:HAL_SPI_RxCpltCallback	64	static
+../Core/Src/spi.c:177:6:HAL_SPI_ErrorCallback	16	static

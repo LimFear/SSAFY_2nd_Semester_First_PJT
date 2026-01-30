@@ -66,17 +66,17 @@ bool can_send_dht(float humidity, float temperature) {
     return false;
 }
 
-void setup() 
+void setup()
 {
     // put your setup code here, to run once:
     Serial.begin(115200);
 
     // CAN 시작
     bool can_ok = can_driver_init();
-    if (!can_ok) 
+    if (!can_ok)
     {
         Serial.println("CAN init failed. Stop.");
-        while (true) 
+        while (true)
         {
             delay(1000);
         }

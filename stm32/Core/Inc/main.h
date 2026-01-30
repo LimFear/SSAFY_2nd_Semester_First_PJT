@@ -38,8 +38,6 @@ extern "C" {
 #include <stdbool.h>
 #include <inttypes.h>
 
-#include "sensor_control.h"
-
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -65,6 +63,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define ESP32_SPI_CS_Pin GPIO_PIN_4
+#define ESP32_SPI_CS_GPIO_Port GPIOA
+#define ESP32_SPI_SCK_Pin GPIO_PIN_5
+#define ESP32_SPI_SCK_GPIO_Port GPIOA
+#define ESP32_SPI_MISO_Pin GPIO_PIN_6
+#define ESP32_SPI_MISO_GPIO_Port GPIOA
+#define ESP32_SPI_MOSI_Pin GPIO_PIN_7
+#define ESP32_SPI_MOSI_GPIO_Port GPIOA
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

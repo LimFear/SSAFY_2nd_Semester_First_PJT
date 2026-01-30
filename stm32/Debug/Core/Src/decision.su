@@ -1,0 +1,2 @@
+../Core/Src/decision.c:3:16:read_le_i16	24	static
+../Core/Src/decision.c:9:5:protocol_parse_dht_x10	32	static
