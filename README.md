@@ -105,100 +105,34 @@ ex)
 - URL을 인터넷에 "http://ip번호" 작성 후 접속. 그럼 mqtt.c 파일 안에 있는 html이 열림.
 - 인터넷 연결 확인 후, ON, OFF 버튼 눌러서 확인할 것.
 
-(26/01/27) 01. 김영진[구현 완료]
+(26/01/30) 01. 임정환[구현 실패] 
+- SPI1 통신 설정은 다음과 같다.
+    1. PA4 - ESP32_SPI_CS
+    2. PA5 - ESP32_SPI_SCK
+    3. PA6 - ESP32_SPI_MISO
+    4. PA7 - ESP32_SPI_MOSI
+    5. SPI1 - global interrupt Enabled 실행
+    6. 그 외의 값들은 Default
 
-0. 구현 개요
-    - CDS 광조도센서 → ESP 센서부 → STM32 게이트웨이 → ESP 동작부 → LED(내부)  
-      전체 CAN 기반 제어 흐름 구현 완료
-    - 개발 환경
-      - STM32CubeIDE v1.19
-      - ESP-IDF
-    - 예정 사항
-      - 외부 LED 모듈로 확장 예정
-      - 기존 온습도(DHT11) 제어 로직과 핀 번호 / 로직 충돌 예상
-        - 추후 merge 시 통합 예정
+- FREERTOS 설정은 사진을 참고해서 설정한다 (freertos.c 참고).
+![alt text](image.png)
+![alt text](image-1.png)
 
-1. ESP 센서부
-핀 번호 (Pin Assignment)
+- 현재 상황
+    1. MQTT 로 태블릿과 mqtt 보드 연결 완료
+    2. stm32와 센서, 동작부 연결 완료
+    3. mqtt가 auto flag를 전송하면, freertos를 통해 자동적으로 동작하는 알고리즘 실행
+    4. mqtt가 On, Off flag를 전송하면 우선적으로 동작하도록 설계했음.
+    5. stm32에서 센서 데이터 받아오는 것을 로그로 확인함
+    6. mqtt html에서 동작 flag(On, Off, AUTO로 변경했는지 확인하는 로그)가 제대로 출력됨을 확인함
 
-| 기능 | 핀 번호 (GPIO) | 설명 |
-| :--- | :---: | :--- |
-| CAN TX | 33 | TWAI(CAN) 데이터 송신 |
-| CAN RX | 32 | TWAI(CAN) 데이터 수신 |
-| ADC Sensor | 34 | 조도 센서 (ADC1_CH6) 입력 |
+- 확인 필요한 상황
+1. mqtt 보드와 stm32 간의 통신 확인 필요
 
-데이터 패킷 설명 (CAN Data Protocol)
-- ID: `0x101`
-- DLC: `8` (실제 데이터는 Byte 0~1 사용)
-  
-| Byte | 역할 | 값 범위 | 설명 |
-| :---: | :--- | :---: | :--- |
-| Byte 0 | ADC High | 0 ~ 15 | ADC Raw 상위 8비트 |
-| Byte 1 | ADC Low | 0 ~ 255 | ADC Raw 하위 8비트 |
-| Byte 2~7 | Reserved | 0 | 미사용 |
-
-동작 설명
-- 조도 센서를 200ms 주기로 ADC(12-bit) 계측
-- 측정 데이터를 CAN 메시지로 송신
-- CAN 통신 속도: 500 kbps (TWAI, Normal Mode)
-
-2. STM32 게이트웨이
-핀 번호 (Pin Assignment)
-
-| 기능 | Port / Pin | 설명 |
-| :--- | :---: | :--- |
-| CAN1 TX | PA12 | CAN 데이터 송신 |
-| CAN1 RX | PA11 | CAN 데이터 수신 |
-| UART1 TX | PA9 | 디버그 로그 출력 |
-| UART1 RX | PA10 | 디버그 명령 수신 |
-
-데이터 패킷 설명 (CAN Data Protocol)
-수신 (From ESP Sensor)
-- ID: `0x101`
-- `rxData[0]`(High) + `rxData[1]`(Low) → 16-bit 조도값 복원
-송신 (To ESP Actuator)
-- ID: `0x201`
-- DLC: `8`
-
-| Byte | 역할 | 값 | 설명 |
-| :---: | :--- | :---: | :--- |
-| Byte 0 | LED CMD | 0 / 1 | 0: OFF, 1: ON |
-| Byte 1~7 | Padding | 0 | Reserved |
-
-동작 설명
-- CAN 인터럽트 기반 메시지 수신
-- 조도값 기준 임계값(1000) 비교
-  - 초과 → LED ON
-  - 이하 → LED OFF
-- 제어 명령을 CAN 메시지(`0x201`)로 송신
-- UART 로그로 상태 출력
-
-3. ESP 동작부
-핀 번호 (Pin Assignment)
-
-| 기능 | GPIO | 설명 |
-| :--- | :---: | :--- |
-| CAN TX | 33 | TWAI(CAN) 송신 |
-| CAN RX | 32 | TWAI(CAN) 수신 |
-| LED RED | 4 | 내부 LED (임시) |
-| LED GREEN | 5 | RGB LED Green |
-| LED BLUE | 18 | RGB LED Blue |
-
-데이터 패킷 설명 (CAN Data Protocol)
-- ID: `0x201`
-- DLC: `3` (또는 8 사용 시 Byte 0~2만 유효)
-
-| Byte | 역할 | 값 | 설명 |
-| :---: | :--- | :---: | :--- |
-| Byte 0 | Red | 0 / 1 | OFF / ON |
-| Byte 1 | Green | 0 / 1 | OFF / ON |
-| Byte 2 | Blue | 0 / 1 | OFF / ON |
-
-동작 설명
-- CAN 메시지 수신 대기
-- ID `0x201` 메시지만 처리
-- 수신 데이터에 따라 RGB LED 제어
-- 동작 상태 로그 출력
-
-**(26/01/27) 02. 김영진[구현 완료]**
- - [CDS + DHT11 + 운영정책] 통합본 업로드 > 자세한 readme는 READ_ME_for_integration참고
+(26/02/01) 01. 임정환[구현 성공] 
+- ESP32 끼리 CAN 통신 완료
+    1. GPIO 선 정리
+        DHT - 16
+        servo_motor - 17
+        CAN_RX - 32
+        CAN_TX - 33
