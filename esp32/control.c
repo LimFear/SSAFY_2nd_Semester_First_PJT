@@ -2,27 +2,35 @@
 #include "driver/twai.h"
 
 /* =========================
- * ÇÉ ¸ÅÇÎ (CONTROL node)
+ * í•€ ë§¤í•‘ (CONTROL node)
  * ========================= */
 #define CAN_RX_GPIO_PIN         GPIO_NUM_32
 #define CAN_TX_GPIO_PIN         GPIO_NUM_33
 
 #define SERVO_GPIO_PIN          GPIO_NUM_17
 
- /* High-beam "Ãâ·Â" ÇÉ (¸±·¹ÀÌ/Æ®·£Áö½ºÅÍ µî) */
-#define HIGH_OUTPUT_GPIO_PIN    GPIO_NUM_27
+/* High-beam "ì¶œë ¥" í•€ (ë¦´ë ˆì´/íŠ¸ëžœì§€ìŠ¤í„° ë“±)
+ * NOTE: GPIO27ì€ Right LED ì¶”ê°€í•€ìœ¼ë¡œ ì‚¬ìš©í•˜ë¯€ë¡œ ì¶©ëŒ ë°©ì§€ ìœ„í•´ ì´ë™í•¨.
+ */
+#define HIGH_OUTPUT_GPIO_PIN    GPIO_NUM_16
 
-/* »óÅÂ/·¥ÇÁ ÇÉ (LED0~LED4 ¿ªÇÒ ÀçÁ¤ÀÇ) */
-#define PIN_TURN_RIGHT          GPIO_NUM_18   /* Right */
+/* ìƒíƒœ/ëž¨í”„ í•€ */
+#define PIN_TURN_RIGHT          GPIO_NUM_18   /* Right (ê¸°ì¡´) */
+#define PIN_TURN_RIGHT_EXTRA    GPIO_NUM_27   /* Right (ì¶”ê°€) */
+
 #define PIN_HIGH_INDICATOR_A    GPIO_NUM_19   /* High beam indicator */
 #define PIN_HIGH_INDICATOR_B    GPIO_NUM_21   /* High beam indicator */
-#define PIN_TURN_LEFT           GPIO_NUM_22   /* Left */
-#define PIN_EMERGENCY_INDICATOR GPIO_NUM_23   /* Emergency indicator */
+
+#define PIN_TURN_LEFT           GPIO_NUM_22   /* Left (ê¸°ì¡´) */
+#define PIN_TURN_LEFT_EXTRA     GPIO_NUM_26   /* Left (ì¶”ê°€) */
+
+#define PIN_EMERGENCY_INDICATOR       GPIO_NUM_23   /* Emergency (ê¸°ì¡´) */
+#define PIN_EMERGENCY_INDICATOR_EXTRA GPIO_NUM_25   /* Emergency (ì¶”ê°€) */
 
 /* =========================
- * Ãâ·Â ³í¸® (Active-Low ±âÁØ)
- * - true  : LOW=ON, HIGH=OFF (¾Ö³ëµå ½ºÅ¸ÀÏ)
- * - false : HIGH=ON, LOW=OFF (Ä³¼Òµå ½ºÅ¸ÀÏ)
+ * ì¶œë ¥ ë…¼ë¦¬ (Active-Low ê¸°ì¤€)
+ * - true  : LOW=ON, HIGH=OFF
+ * - false : HIGH=ON, LOW=OFF
  * ========================= */
 static const bool kOutputActiveLow = true;
 
@@ -51,8 +59,14 @@ static void writeOutput(gpio_num_t pin, bool on)
     digitalWrite((int)pin, outputLevelOff());
 }
 
+static void writeOutputPair(gpio_num_t pinA, gpio_num_t pinB, bool on)
+{
+    writeOutput(pinA, on);
+    writeOutput(pinB, on);
+}
+
 /* =========================
- * CAN ÇÁ·ÎÅäÄÝ
+ * CAN í”„ë¡œí† ì½œ
  * ========================= */
 #define CAN_ID_CMD_SERVO            0x200
 #define SERVO_CMD_SET_SPEED_LEVEL   0x01
@@ -66,46 +80,46 @@ static void writeOutput(gpio_num_t pin, bool on)
 #define TURN_DIR_LEFT               0x00
 #define TURN_DIR_RIGHT              0x01
 
- /* =========================
-  * ¼Óµµ ·¹º§
-  * ========================= */
-static const uint8_t kSpeedStop = 0;
-static const uint8_t kSpeedSlow = 1;
+/* =========================
+ * ì†ë„ ë ˆë²¨
+ * ========================= */
+static const uint8_t kSpeedStop   = 0;
+static const uint8_t kSpeedSlow   = 1;
 static const uint8_t kSpeedNormal = 2;
-static const uint8_t kSpeedFast = 3;
+static const uint8_t kSpeedFast   = 3;
 
 /* =========================
- * ¼­º¸ ¼³Á¤
+ * ì„œë³´ ì„¤ì •
  * ========================= */
 static const uint8_t  kServoMaxAngleDeg = 125;
 
 static const int      kServoPwmFreqHz = 50;
 static const int      kServoPwmResolutionBits = 16;
 
-static const uint8_t  kSweepStepSlowDeg = 3;
+static const uint8_t  kSweepStepSlowDeg   = 3;
 static const uint8_t  kSweepStepNormalDeg = 5;
-static const uint8_t  kSweepStepFastDeg = 8;
+static const uint8_t  kSweepStepFastDeg   = 8;
 
-static const uint32_t kDwellSlowMs = 120;
+static const uint32_t kDwellSlowMs   = 120;
 static const uint32_t kDwellNormalMs = 80;
-static const uint32_t kDwellFastMs = 40;
+static const uint32_t kDwellFastMs   = 40;
 
 static const uint8_t  kReturnStepDeg = 10;
 static const uint32_t kServoFrameDelayMs = 20;
 
 /* =========================
- * Turn/Hazard ¼³Á¤
+ * Turn/Hazard ì„¤ì •
  * ========================= */
-static const uint32_t kTurnPulseMs = 800;        /* Right/Left: 0.8ÃÊ ÆÞ½º */
-static const uint32_t kHazardToggleMs = 800;     /* Emergency: 0.8ÃÊ Åä±Û */
+static const uint32_t kTurnPulseMs = 500;
+static const uint32_t kHazardToggleMs = 500;
 
 /* =========================
- * Àü¿ª »óÅÂ
+ * ì „ì—­ ìƒíƒœ
  * ========================= */
 static volatile uint8_t g_targetServoSpeedLevel = kSpeedStop;
 static volatile uint8_t g_targetHighBeamState = 0;
 
-/* RX µð¹ö±× Ä«¿îÅÍ */
+/* RX ë””ë²„ê·¸ ì¹´ìš´í„° */
 static uint32_t g_rxCountTotal = 0;
 static uint32_t g_rxCountServo = 0;
 static uint32_t g_rxCountHighBeam = 0;
@@ -113,7 +127,7 @@ static uint32_t g_rxCountTurn = 0;
 static uint32_t g_rxCountOther = 0;
 
 /* =========================
- * ¼­º¸ ½ºÀ¬ »óÅÂ
+ * ì„œë³´ ìŠ¤ìœ• ìƒíƒœ
  * ========================= */
 typedef struct
 {
@@ -127,7 +141,7 @@ typedef struct
 static ServoSweepState_t g_servo = { 0 };
 
 /* =========================
- * Turn/Hazard »óÅÂ
+ * Turn/Hazard ìƒíƒœ
  * ========================= */
 static volatile bool g_hazardEnabled = false;
 static uint32_t g_leftPulseUntilMs = 0;
@@ -139,7 +153,7 @@ static uint32_t g_hazardNextToggleMs = 0;
 static bool g_turnPhaseOn = false;
 
 /* =========================
- * ¼­º¸ À¯Æ¿
+ * ì„œë³´ ìœ í‹¸
  * ========================= */
 static uint32_t servoDutyFromPulseUs(uint32_t pulseUs)
 {
@@ -290,47 +304,45 @@ static void servoUpdate(uint32_t nowMs)
 }
 
 /* =========================
- * ·¥ÇÁ/Ç¥½Ã ÃÊ±âÈ­
+ * ëž¨í”„/í‘œì‹œ ì´ˆê¸°í™”
  * ========================= */
 static void lampsInit()
 {
     pinMode((int)PIN_TURN_RIGHT, OUTPUT);
+    pinMode((int)PIN_TURN_RIGHT_EXTRA, OUTPUT);
+
     pinMode((int)PIN_TURN_LEFT, OUTPUT);
+    pinMode((int)PIN_TURN_LEFT_EXTRA, OUTPUT);
+
     pinMode((int)PIN_EMERGENCY_INDICATOR, OUTPUT);
+    pinMode((int)PIN_EMERGENCY_INDICATOR_EXTRA, OUTPUT);
+
     pinMode((int)PIN_HIGH_INDICATOR_A, OUTPUT);
     pinMode((int)PIN_HIGH_INDICATOR_B, OUTPUT);
 
-    writeOutput(PIN_TURN_RIGHT, false);
-    writeOutput(PIN_TURN_LEFT, false);
-    writeOutput(PIN_EMERGENCY_INDICATOR, false);
+    writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, false);
+    writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, false);
+    writeOutputPair(PIN_EMERGENCY_INDICATOR, PIN_EMERGENCY_INDICATOR_EXTRA, false);
+
     writeOutput(PIN_HIGH_INDICATOR_A, false);
     writeOutput(PIN_HIGH_INDICATOR_B, false);
 }
 
 static void applyHighBeamIndicators(uint8_t highBeamState)
 {
-    bool on = false;
-    if (highBeamState != 0U) {
-        on = true;
-    }
-
+    bool on = (highBeamState != 0U);
     writeOutput(PIN_HIGH_INDICATOR_A, on);
     writeOutput(PIN_HIGH_INDICATOR_B, on);
 }
 
 static void applyHighBeamOutput(uint8_t highBeamState)
 {
-    bool on = false;
-    if (highBeamState != 0U) {
-        on = true;
-    }
-
-    /* Ãâ·Â ÇÉµµ °°Àº Active-Low ±âÁØÀ¸·Î Ã³¸® */
+    bool on = (highBeamState != 0U);
     writeOutput(HIGH_OUTPUT_GPIO_PIN, on);
 }
 
 /* =========================
- * Turn/Hazard ·ÎÁ÷ (CONTROL node¿¡¼­ ½ÇÁ¦ ÇÉ Åä±Û)
+ * Turn/Hazard ë¡œì§
  * ========================= */
 static void setHazardEnabled(bool enabled, uint32_t nowMs)
 {
@@ -344,17 +356,17 @@ static void setHazardEnabled(bool enabled, uint32_t nowMs)
         g_hazardPhaseOn = true;
         g_hazardNextToggleMs = nowMs + kHazardToggleMs;
 
-        writeOutput(PIN_TURN_RIGHT, true);
-        writeOutput(PIN_TURN_LEFT, true);
-        writeOutput(PIN_EMERGENCY_INDICATOR, true);
+        writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, true);
+        writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, true);
+        writeOutputPair(PIN_EMERGENCY_INDICATOR, PIN_EMERGENCY_INDICATOR_EXTRA, true);
         return;
     }
 
     g_hazardPhaseOn = false;
 
-    writeOutput(PIN_TURN_RIGHT, false);
-    writeOutput(PIN_TURN_LEFT, false);
-    writeOutput(PIN_EMERGENCY_INDICATOR, false);
+    writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, false);
+    writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, false);
+    writeOutputPair(PIN_EMERGENCY_INDICATOR, PIN_EMERGENCY_INDICATOR_EXTRA, false);
 }
 
 static void startLeftPulse(uint32_t nowMs)
@@ -363,23 +375,22 @@ static void startLeftPulse(uint32_t nowMs)
         return;
     }
 
-    /* °°Àº ¹æÇâÀ» ¶Ç ´©¸£¸é OFF */
+    /* ê°™ì€ ë°©í–¥ì„ ë˜ ëˆ„ë¥´ë©´ OFF */
     if (g_leftPulseUntilMs != 0U) {
         g_leftPulseUntilMs = 0U;
         g_turnPhaseOn = false;
-        writeOutput(PIN_TURN_LEFT, false);
+        writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, false);
         return;
     }
 
-    /* ÁÂ ½ÃÀÛ: ¿ì´Â ²ô°í ÁÂ Á¡¸ê ½ÃÀÛ */
+    /* ì¢Œ ì‹œìž‘: ìš°ëŠ” ë„ê³  ì¢Œ ì ë©¸ ì‹œìž‘ */
     g_rightPulseUntilMs = 0U;
-    writeOutput(PIN_TURN_RIGHT, false);
+    writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, false);
 
-    g_turnPhaseOn = true;                 // ½ÃÀÛÀº ON
-    g_leftPulseUntilMs = nowMs + kTurnPulseMs;   // ´ÙÀ½ Åä±Û ½Ã°¢
-    writeOutput(PIN_TURN_LEFT, true);
+    g_turnPhaseOn = true;
+    g_leftPulseUntilMs = nowMs + kTurnPulseMs;
+    writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, true);
 }
-
 
 static void startRightPulse(uint32_t nowMs)
 {
@@ -387,23 +398,22 @@ static void startRightPulse(uint32_t nowMs)
         return;
     }
 
-    /* °°Àº ¹æÇâÀ» ¶Ç ´©¸£¸é OFF */
+    /* ê°™ì€ ë°©í–¥ì„ ë˜ ëˆ„ë¥´ë©´ OFF */
     if (g_rightPulseUntilMs != 0U) {
         g_rightPulseUntilMs = 0U;
         g_turnPhaseOn = false;
-        writeOutput(PIN_TURN_RIGHT, false);
+        writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, false);
         return;
     }
 
-    /* ¿ì ½ÃÀÛ: ÁÂ´Â ²ô°í ¿ì Á¡¸ê ½ÃÀÛ */
+    /* ìš° ì‹œìž‘: ì¢ŒëŠ” ë„ê³  ìš° ì ë©¸ ì‹œìž‘ */
     g_leftPulseUntilMs = 0U;
-    writeOutput(PIN_TURN_LEFT, false);
+    writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, false);
 
     g_turnPhaseOn = true;
     g_rightPulseUntilMs = nowMs + kTurnPulseMs;
-    writeOutput(PIN_TURN_RIGHT, true);
+    writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, true);
 }
-
 
 static void signalsUpdate(uint32_t nowMs)
 {
@@ -413,13 +423,12 @@ static void signalsUpdate(uint32_t nowMs)
             g_hazardNextToggleMs = nowMs + kHazardToggleMs;
             g_hazardPhaseOn = !g_hazardPhaseOn;
 
-            writeOutput(PIN_TURN_RIGHT, g_hazardPhaseOn);
-            writeOutput(PIN_TURN_LEFT, g_hazardPhaseOn);
-            writeOutput(PIN_EMERGENCY_INDICATOR, g_hazardPhaseOn);
+            writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, g_hazardPhaseOn);
+            writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, g_hazardPhaseOn);
+            writeOutputPair(PIN_EMERGENCY_INDICATOR, PIN_EMERGENCY_INDICATOR_EXTRA, g_hazardPhaseOn);
         }
         return;
     }
-
 
     if (g_leftPulseUntilMs != 0U || g_rightPulseUntilMs != 0U)
     {
@@ -431,22 +440,21 @@ static void signalsUpdate(uint32_t nowMs)
         }
 
         if (g_leftPulseUntilMs != 0U) {
-            writeOutput(PIN_TURN_LEFT, g_turnPhaseOn);
-            writeOutput(PIN_TURN_RIGHT, false);
-        }
-        else {
-            writeOutput(PIN_TURN_RIGHT, g_turnPhaseOn);
-            writeOutput(PIN_TURN_LEFT, false);
+            writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, g_turnPhaseOn);
+            writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, false);
+        } else {
+            writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, g_turnPhaseOn);
+            writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, false);
         }
 
-        writeOutput(PIN_EMERGENCY_INDICATOR, false);
+        writeOutputPair(PIN_EMERGENCY_INDICATOR, PIN_EMERGENCY_INDICATOR_EXTRA, false);
         return;
     }
 
-    /* ¾Æ¹« °Íµµ ¾Æ´Ï¸é ÀüºÎ OFF */
-    writeOutput(PIN_TURN_LEFT, false);
-    writeOutput(PIN_TURN_RIGHT, false);
-    writeOutput(PIN_EMERGENCY_INDICATOR, false);
+    /* ì•„ë¬´ ê²ƒë„ ì•„ë‹ˆë©´ ì „ë¶€ OFF */
+    writeOutputPair(PIN_TURN_LEFT, PIN_TURN_LEFT_EXTRA, false);
+    writeOutputPair(PIN_TURN_RIGHT, PIN_TURN_RIGHT_EXTRA, false);
+    writeOutputPair(PIN_EMERGENCY_INDICATOR, PIN_EMERGENCY_INDICATOR_EXTRA, false);
 }
 
 /* =========================
@@ -561,10 +569,7 @@ static void canPollCommands()
             }
 
             if (command == TURN_CMD_HAZARD_SET) {
-                bool enabled = false;
-                if (value != 0U) {
-                    enabled = true;
-                }
+                bool enabled = (value != 0U);
                 setHazardEnabled(enabled, nowMs);
                 Serial.printf("[RX] HAZARD enabled=%u\n", enabled ? 1 : 0);
                 g_rxCountTurn++;
@@ -610,7 +615,6 @@ void loop()
 
     uint32_t nowMs = millis();
 
-    /* 1ÃÊ¸¶´Ù ¼ö½Å »óÅÂ ¿ä¾à Ãâ·Â */
     static uint32_t lastStatMs = 0;
     if ((nowMs - lastStatMs) >= 1000) {
         lastStatMs = nowMs;
