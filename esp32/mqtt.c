@@ -1,4 +1,4 @@
-#include <Arduino.h>
+ï»¿#include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
@@ -7,7 +7,7 @@
 #include "driver/twai.h"
 
 /* =========================
- * WiFi / MQTT ¼³Á¤ (Á¤È¯´Ô ±âÁ¸ À¯Áö)
+ * WiFi / MQTT ì„¤ì •
  * ========================= */
 static const char* WIFI_SSID = "e^(ix) = k cosx + ki sinx, k = ?";
 static const char* WIFI_PASS = "haha5123";
@@ -15,32 +15,49 @@ static const char* WIFI_PASS = "haha5123";
 static const char* MQTT_HOST = "broker.emqx.io";
 static const uint16_t MQTT_PORT = 1883;
 
-/* ÅäÇÈ º£ÀÌ½º */
+/* í† í”½ ë² ì´ìŠ¤ */
 static const char* TOPIC_BASE = "Lim/haha5123/esp32";
 
 /* =========================
- * CAN ÇÉ/ID
+ * CAN í•€/ID
  * ========================= */
 #define CAN_RX_GPIO_PIN GPIO_NUM_32
 #define CAN_TX_GPIO_PIN GPIO_NUM_33
 
 #define CAN_DHT_ID              0x100
+#define CAN_CDS_ID              0x110
 
 #define CAN_ID_CMD_SERVO        0x200
 #define SERVO_CMD_SET_ANGLE     0x01
 
-#define CAN_ID_CMD_HIGH         0x210
-#define HIGH_CMD_SET_STATE      0x11
+#define CAN_ID_CMD_HIGH_BEAM    0x210
+#define HIGH_BEAM_CMD_SET_STATE 0x11
+
+
+#define CAN_ID_CMD_TURN           0x220
+#define TURN_CMD_PULSE            0x31
+#define TURN_CMD_HAZARD_SET       0x32
+#define TURN_DIR_LEFT             0x00
+#define TURN_DIR_RIGHT            0x01
+
 
  /* =========================
-  * ¸ğµå »ó¼ö (Á¤È¯´Ô ±âÁ¸ À¯Áö)
+  * ëª¨ë“œ ìƒìˆ˜
   * ========================= */
 static const uint8_t MODE_AUTO = 0;
 static const uint8_t MODE_ON = 1;
 static const uint8_t MODE_OFF = 2;
 
+
 /* =========================
- * ¼Óµµ ·¹º§ (control ³ëµå¿Í µ¿ÀÏ)
+ * ë°©í–¥ì§€ì‹œë“± ëª¨ë“œ
+ * ========================= */
+static const uint8_t TURN_MODE_OFF = 0;
+static const uint8_t TURN_MODE_LEFT = 1;
+static const uint8_t TURN_MODE_RIGHT = 2;
+static const uint8_t TURN_MODE_HAZARD = 3;
+/* =========================
+ * ì†ë„ ë ˆë²¨ (control ë…¸ë“œì™€ ë™ì¼)
  * ========================= */
 static const uint8_t kSpeedLevelStop = 0;
 static const uint8_t kSpeedLevelSlow = 1;
@@ -48,44 +65,61 @@ static const uint8_t kSpeedLevelNormal = 2;
 static const uint8_t kSpeedLevelFast = 3;
 
 /* =========================
- * AUTO ÀÓ°è°ª (¿øÇÏ½Ã¸é Á¶Á¤)
+ * AUTO ì„ê³„ê°’ (ì›í•˜ì‹œë©´ ì¡°ì •)
  * ========================= */
 static const float kWiperHumThSlow = 30.0f;
 static const float kWiperHumThNormal = 35.0f;
 static const float kWiperHumThFast = 40.0f;
 
-/* ¼öµ¿ ONÀÏ ¶§ °íÁ¤ speed */
+/* ìˆ˜ë™ ONì¼ ë•Œ ê³ ì • speed */
 static const uint8_t kManualWiperOnSpeed = kSpeedLevelNormal;
 
 /* =========================
- * Àü¿ª »óÅÂ
+ * AUTO CDS(ì¡°ë„, ADC raw) threshold
+ * - ì¼ë°˜ì ìœ¼ë¡œ 'ì–´ë‘ìš¸ìˆ˜ë¡ ADCê°€ ì»¤ì§€ëŠ”' ë°°ì¹˜ê°€ ë§ìŒ.
+ * - ë§Œì•½ ë°ì„ìˆ˜ë¡ ADCê°€ ì»¤ì§„ë‹¤ë©´ kCdsDarkIsHighAdc ë¥¼ falseë¡œ ë°”ê¾¸ë©´ ë¨.
+ * ========================= */
+static const bool kCdsDarkIsHighAdc = true;
+static const uint16_t kCdsOnThresholdAdc = 800;
+static const uint16_t kCdsOffThresholdAdc = 750;
+/* =========================
+ * ì „ì—­ ìƒíƒœ
  * ========================= */
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 WebServer webServer(80);
 
 static uint8_t g_wiperMode = MODE_AUTO;
-static uint8_t g_highMode = MODE_AUTO;
+static uint8_t g_highBeamMode = MODE_AUTO;
 
+
+static uint8_t g_turnMode = TURN_MODE_OFF;
 static char g_deviceId[16];
 
 static char g_topicWiperCmd[96];
-static char g_topicHighCmd[96];
+static char g_topicHighBeamCmd[96];
+static char g_topicHighCmdCompat[96];
 static char g_topicWiperState[96];
-static char g_topicHighState[96];
+static char g_topicHighBeamState[96];
+static char g_topicHighStateCompat[96];
 static char g_topicOnline[96];
 
-/* ¼¾¼­ ÃÖ½Å°ª */
+/* ì„¼ì„œ ìµœì‹ ê°’ */
 static float g_humidity = NAN;
 static float g_temperature = NAN;
 static uint32_t g_lastSensorUpdateMs = 0;
 
-/* ¸¶Áö¸·À¸·Î º¸³½ ¸í·É(Áßº¹ ¼Û½Å ÁÙÀÌ±â¿ë) */
-static uint8_t g_lastSentSpeedLevel = 0xFF;
-static uint8_t g_lastSentHighState = 0xFF;
+static bool g_hasCds = false;
+static uint16_t g_cdsAdc = 0;
+static uint32_t g_lastCdsUpdateMs = 0;
 
+/* ë§ˆì§€ë§‰ìœ¼ë¡œ ë³´ë‚¸ ëª…ë ¹(ì¤‘ë³µ ì†¡ì‹  ì¤„ì´ê¸°ìš©) */
+static uint8_t g_lastSentSpeedLevel = 0xFF;
+static uint8_t g_lastSentHighBeamState = 0xFF;
+
+static uint8_t g_lastSentTurnMode = 0xFF;
 /* =========================
- * À¯Æ¿
+ * ìœ í‹¸
  * ========================= */
 
 const char INDEX_HTML[] PROGMEM = R"HTML(
@@ -430,8 +464,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 <body>
   <div class="portraitLock">
     <div>
-      <div style="font-size:22px; margin-bottom:10px; color: rgba(255,255,255,.85);">°¡·Î ¸ğµå¿¡¼­ »ç¿ëÇÏ½Ê½Ã¿À.</div>
-      <div style="font-size:14px; color: rgba(255,255,255,.55);">ÅÂºí¸´À» °¡·Î·Î ´¯È÷¸é ÄÁÆ®·Ñ ÆĞ³ÎÀÌ Ç¥½ÃµË´Ï´Ù.</div>
+      <div style="font-size:22px; margin-bottom:10px; color: rgba(255,255,255,.85);">ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½å¿¡ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½Ï½Ê½Ã¿ï¿½.</div>
+      <div style="font-size:14px; color: rgba(255,255,255,.55);">ï¿½Âºï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½Î·ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½Æ®ï¿½ï¿½ ï¿½Ğ³ï¿½ï¿½ï¿½ Ç¥ï¿½ÃµË´Ï´ï¿½.</div>
     </div>
   </div>
 
@@ -480,12 +514,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
               <path class="fillNeon" d="M18 38h28l4 12H14l4-12z"/>
               <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round" d="M32 10v6"/>
             </svg>
-            <div class="iconLabel">Emer</div>
+            <div class="iconLabel">Emergency</div>
           </div>
         </button>
       </div>
 
-      <div class="controlGroup" data-group="high">
+      <div class="controlGroup" data-group="high_beam">
         <div class="iconCard">
           <div class="iconInner">
             <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
@@ -494,9 +528,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
               <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
                 d="M20 28h-6M22 24h-8M22 32h-8"/>
               <text x="36" y="40" fill="rgba(102,243,220,.85)" font-size="10" font-weight="700">AUTO</text>
-              <text x="38" y="52" fill="rgba(102,243,220,.85)" font-size="12" font-weight="800">High</text>
+              <text x="38" y="52" fill="rgba(102,243,220,.85)" font-size="12" font-weight="800">High Beam</text>
             </svg>
-            <div class="iconLabel">High</div>
+            <div class="iconLabel">High Beam</div>
           </div>
         </div>
 
@@ -527,8 +561,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         <button class="resetBtn" type="button">Reset<br/>Rotation</button>
 
         <div class="readouts">
-          <div>Temperature: <b id="tempText">--¡ÆC</b></div>
+          <div>Temperature: <b id="tempText">--C</b></div>
           <div>Humidity: <b id="humText">--%</b></div>
+          <div>CDS(ADC): <b id="cdsText">--</b></div>
         </div>
       </div>
     </div>
@@ -591,12 +626,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   </div>
 
 <script>
-  // ===== °ø¿ë À¯Æ¿ =====
+  // ===== ê³µìš© ìœ í‹¸ =====
   function setActive(element, on) {
     element.classList.toggle('active', Boolean(on));
   }
 
-  // ===== [Ãß°¡] ESP32·Î ¸í·É º¸³»±â =====
+  // ===== [ì¶”ê°€] ESP32ë¡œ ëª…ë ¹ ë³´ë‚´ê¸° =====
   async function sendMode(target, state) {
     // state: 'auto' | 'on' | 'off'
     let mode = 'AUTO';
@@ -606,11 +641,11 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     try {
       await fetch('/api/set?target=' + encodeURIComponent(target) + '&mode=' + encodeURIComponent(mode));
     } catch (e) {
-      // ³×Æ®¿öÅ© ²÷°Üµµ UI°¡ ¸ØÃßÁö ¾Ê°Ô ¹«½Ã
+      // ë„¤íŠ¸ì›Œí¬ ëŠê²¨ë„ UIê°€ ë©ˆì¶”ì§€ ì•Šê²Œ ë¬´ì‹œ
     }
   }
 
-  // ===== [Ãß°¡] ¼­¹ö »óÅÂ µ¿±âÈ­ =====
+  // ===== [ì¶”ê°€] ì„œë²„ ìƒíƒœ ë™ê¸°í™” =====
   function setGroupUI(groupEl, state) {
     const segmentButtons = groupEl.querySelectorAll('.segBtn');
     const autoButton = groupEl.querySelector('.autoBtn');
@@ -636,9 +671,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const r = await fetch('/api/state');
       const j = await r.json();
 
-      // wiper/high »óÅÂ ¹İ¿µ
+      // wiper/high_beam ìƒíƒœ ë°˜ì˜
       const wiperGroup = document.querySelector('.controlGroup[data-group="wiper"]');
-      const highGroup  = document.querySelector('.controlGroup[data-group="high"]');
+      const highGroup  = document.querySelector('.controlGroup[data-group="high_beam"]');
 
       if (wiperGroup) {
         const state = (j.wiper || 'AUTO').toLowerCase(); // 'auto'/'on'/'off'
@@ -646,23 +681,45 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       }
 
       if (highGroup) {
-        const state = (j.high || 'AUTO').toLowerCase();
+        const state = ((j.high_beam || j.high || 'AUTO')).toLowerCase();
         setGroupUI(highGroup, state);
       }
 
-      // (¼±ÅÃ) ¿Â½Àµµ Ç¥½Ã: Áö±İÀº ¼­¹ö°¡ °ª ¾È ÁÖ¸é -- À¯Áö
+      // turn ìƒíƒœ ë°˜ì˜ (OFF/LEFT/RIGHT/HAZARD)
+      if (typeof j.turn === 'string') {
+        const t = (j.turn || 'OFF').toLowerCase();
+
+        if (t === 'hazard') {
+          setHazard(true);
+        } else {
+          setHazard(false);
+
+          if (t === 'left') {
+            setTurnSignal('left');
+          } else if (t === 'right') {
+            setTurnSignal('right');
+          } else {
+            setTurnSignal('off');
+          }
+        }
+      }
+
+      // (ì„ íƒ) ì˜¨ìŠµë„ í‘œì‹œ: ì§€ê¸ˆì€ ì„œë²„ê°€ ê°’ ì•ˆ ì£¼ë©´ -- ìœ ì§€
       if (typeof j.temp === 'number') {
-        document.getElementById('tempText').textContent = j.temp.toFixed(1) + '¡ÆC';
+        document.getElementById('tempText').textContent = j.temp.toFixed(1) + 'ï¿½ï¿½C';
       }
       if (typeof j.hum === 'number') {
         document.getElementById('humText').textContent = j.hum.toFixed(1) + '%';
       }
+      if (typeof j.cds === 'number') {
+        document.getElementById('cdsText').textContent = String(j.cds);
+      }
     } catch(e) {
-      // ¹«½Ã
+      // ë¬´ì‹œ
     }
   }
 
-  // ===== 1) AUTO ±âº»°ª + [Ãß°¡] Å¬¸¯ ½Ã ESP32·Î Àü¼Û =====
+  // ===== 1) AUTO ê¸°ë³¸ê°’ + [ì¶”ê°€] í´ë¦­ ì‹œ ESP32ë¡œ ì „ì†¡ =====
   document.querySelectorAll('.controlGroup').forEach(group => {
     const groupName = group.dataset.group || '';
     const segmentButtons = group.querySelectorAll('.segBtn');
@@ -690,8 +747,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         });
       }
 
-      // [Ãß°¡] wiper/high¸é ¼­¹ö·Î ¸í·É Àü¼Û
-      if (groupName === 'wiper' || groupName === 'high') {
+      // [ì¶”ê°€] wiper/highë©´ ì„œë²„ë¡œ ëª…ë ¹ ì „ì†¡
+      if (groupName === 'wiper' || groupName === 'high_beam') {
         sendMode(groupName, state);
       }
     }
@@ -705,10 +762,21 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     setState('auto');
   });
 
-  // ===== ¹öÆ° ÂüÁ¶ =====
+  // ===== ë²„íŠ¼ ì°¸ì¡° =====
   const leftButton  = document.querySelector('[data-box="left"]');
   const rightButton = document.querySelector('[data-box="right"]');
   const emerButton  = document.querySelector('[data-box="emer"]');
+
+
+  // ===== [ì¶”ê°€] ESP32ë¡œ ë°©í–¥ì§€ì‹œë“±/ë¹„ìƒë“± ëª…ë ¹ ë³´ë‚´ê¸° =====
+  async function sendTurn(mode) {
+    // mode: 'OFF' | 'LEFT' | 'RIGHT' | 'HAZARD'
+    try {
+      await fetch('/api/turn?mode=' + encodeURIComponent(mode));
+    } catch (e) {
+      // ë¬´ì‹œ
+    }
+  }
 
   function isHazardOn() {
     if (!emerButton) return false;
@@ -743,25 +811,36 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   }
 
   if (leftButton) {
-    leftButton.addEventListener('click', () => {
-      if (isHazardOn()) return;
+    leftButton.addEventListener('click', async () => {
+      if (isHazardOn()) {
+        setHazard(false);
+        await sendTurn('OFF');
+      }
+
       const wantOn = !leftButton.classList.contains('active');
       setTurnSignal(wantOn ? 'left' : 'off');
+      await sendTurn(wantOn ? 'LEFT' : 'OFF');
     });
   }
 
   if (rightButton) {
-    rightButton.addEventListener('click', () => {
-      if (isHazardOn()) return;
+    rightButton.addEventListener('click', async () => {
+      if (isHazardOn()) {
+        setHazard(false);
+        await sendTurn('OFF');
+      }
+
       const wantOn = !rightButton.classList.contains('active');
       setTurnSignal(wantOn ? 'right' : 'off');
+      await sendTurn(wantOn ? 'RIGHT' : 'OFF');
     });
   }
 
   if (emerButton) {
-    emerButton.addEventListener('click', () => {
+    emerButton.addEventListener('click', async () => {
       const nextOn = !emerButton.classList.contains('active');
       setHazard(nextOn);
+      await sendTurn(nextOn ? 'HAZARD' : 'OFF');
     });
   }
 
@@ -789,7 +868,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     });
   });
 
-  // [Ãß°¡] 1ÃÊ¸¶´Ù ¼­¹ö »óÅÂ µ¿±âÈ­
+  // [ì¶”ê°€] 1ì´ˆë§ˆë‹¤ ì„œë²„ ìƒíƒœ ë™ê¸°í™”
   refreshFromServer();
   setInterval(refreshFromServer, 1000);
 </script>
@@ -810,6 +889,51 @@ static const char* mode_to_string(uint8_t mode)
         return "OFF";
     }
     return "UNKNOWN";
+}
+
+static const char* turn_mode_to_string(uint8_t mode)
+{
+    if (mode == TURN_MODE_OFF) {
+        return "OFF";
+    }
+    if (mode == TURN_MODE_LEFT) {
+        return "LEFT";
+    }
+    if (mode == TURN_MODE_RIGHT) {
+        return "RIGHT";
+    }
+    if (mode == TURN_MODE_HAZARD) {
+        return "HAZARD";
+    }
+    return "UNKNOWN";
+}
+
+static bool parse_turn_mode_query(const char* modeStr, uint8_t* outMode)
+{
+    if (modeStr == NULL) {
+        return false;
+    }
+    if (outMode == NULL) {
+        return false;
+    }
+
+    if (strcmp(modeStr, "OFF") == 0) {
+        *outMode = TURN_MODE_OFF;
+        return true;
+    }
+    if (strcmp(modeStr, "LEFT") == 0) {
+        *outMode = TURN_MODE_LEFT;
+        return true;
+    }
+    if (strcmp(modeStr, "RIGHT") == 0) {
+        *outMode = TURN_MODE_RIGHT;
+        return true;
+    }
+    if (strcmp(modeStr, "HAZARD") == 0) {
+        *outMode = TURN_MODE_HAZARD;
+        return true;
+    }
+    return false;
 }
 
 static bool parse_mode_payload(const char* payload, uint8_t* outMode)
@@ -866,7 +990,7 @@ static bool canInit()
     return true;
 }
 
-static void can_send_servo_speed(uint8_t speedLevel)
+static bool can_send_servo_speed(uint8_t speedLevel)
 {
     twai_message_t tx = {};
     tx.identifier = CAN_ID_CMD_SERVO;
@@ -875,22 +999,138 @@ static void can_send_servo_speed(uint8_t speedLevel)
     tx.data[0] = SERVO_CMD_SET_ANGLE;
     tx.data[1] = speedLevel;
 
-    (void)twai_transmit(&tx, 0);
+    esp_err_t result = twai_transmit(&tx, 10);
+    if (result != ESP_OK) {
+        Serial.printf("[CAN-TX-FAIL] SERVO id=0x%03X err=%d speed=%u\n",
+            (unsigned)tx.identifier,
+            (int)result,
+            (unsigned)speedLevel);
+        return false;
+    }
+
+    return true;
 }
 
-static void can_send_high_state(uint8_t highState)
+
+static bool can_send_high_beam_state(uint8_t highBeamState)
 {
-    uint8_t onoff = (highState != 0U) ? 1U : 0U;
+    uint8_t onoff = (highBeamState != 0U) ? 1U : 0U;
 
     twai_message_t tx = {};
-    tx.identifier = CAN_ID_CMD_HIGH;
+    tx.identifier = CAN_ID_CMD_HIGH_BEAM;
     tx.flags = TWAI_MSG_FLAG_NONE;
     tx.data_length_code = 2;
-    tx.data[0] = HIGH_CMD_SET_STATE;
+    tx.data[0] = HIGH_BEAM_CMD_SET_STATE;
     tx.data[1] = onoff;
 
-    (void)twai_transmit(&tx, 0);
+    esp_err_t result = twai_transmit(&tx, 10);
+    if (result != ESP_OK) {
+        Serial.printf("[CAN-TX-FAIL] HIGH_BEAM id=0x%03X err=%d state=%u\n",
+            (unsigned)tx.identifier,
+            (int)result,
+            (unsigned)onoff);
+        return false;
+    }
+
+    return true;
 }
+
+static bool can_send_turn_pulse(uint8_t dir)
+{
+    twai_message_t tx = {};
+    tx.identifier = CAN_ID_CMD_TURN;
+    tx.flags = TWAI_MSG_FLAG_NONE;
+    tx.data_length_code = 2;
+    tx.data[0] = TURN_CMD_PULSE;
+    tx.data[1] = dir;
+
+    esp_err_t result = twai_transmit(&tx, 10);
+    if (result != ESP_OK) {
+        Serial.printf("[CAN-TX-FAIL] TURN_PULSE id=0x%03X err=%d dir=%u\n",
+            (unsigned)tx.identifier, (int)result, (unsigned)dir);
+        return false;
+    }
+    return true;
+}
+
+static bool can_send_hazard_set(bool enabled)
+{
+    twai_message_t tx = {};
+    tx.identifier = CAN_ID_CMD_TURN;
+    tx.flags = TWAI_MSG_FLAG_NONE;
+    tx.data_length_code = 2;
+    tx.data[0] = TURN_CMD_HAZARD_SET;
+    tx.data[1] = enabled ? 1U : 0U;
+
+    esp_err_t result = twai_transmit(&tx, 10);
+    if (result != ESP_OK) {
+        Serial.printf("[CAN-TX-FAIL] HAZARD_SET id=0x%03X err=%d en=%u\n",
+            (unsigned)tx.identifier, (int)result, enabled ? 1U : 0U);
+        return false;
+    }
+    return true;
+}
+
+static bool send_turn_transition(uint8_t prevMode, uint8_t newMode)
+{
+    bool ok = true;
+
+    // prevModeê°€ ì´ˆê¸°ê°’(0xFF)ì¼ ë•ŒëŠ” ì˜ë¯¸ ì—†ëŠ” OFF ì²˜ë¦¬ ìƒëµ
+    if (prevMode == 0xFF) {
+        if (newMode == TURN_MODE_HAZARD) {
+            return can_send_hazard_set(true);
+        }
+        if (newMode == TURN_MODE_LEFT) {
+            return can_send_turn_pulse(TURN_DIR_LEFT);
+        }
+        if (newMode == TURN_MODE_RIGHT) {
+            return can_send_turn_pulse(TURN_DIR_RIGHT);
+        }
+        return true; // newMode == OFF
+    }
+
+    // hazard -> ë‹¤ë¥¸ ëª¨ë“œ: hazard ë¨¼ì € ë”
+    if (prevMode == TURN_MODE_HAZARD && newMode != TURN_MODE_HAZARD) {
+        ok = can_send_hazard_set(false) && ok;
+    }
+
+    // new hazard: hazard ì¼¬
+    if (newMode == TURN_MODE_HAZARD) {
+        ok = can_send_hazard_set(true) && ok;
+        return ok;
+    }
+
+    // new left/right: í•œ ë²ˆë§Œ PULSE ë³´ë‚´ë©´ CONTROLì´ ì•Œì•„ì„œ ì ë©¸ ì‹œì‘/ë°©í–¥ì „í™˜ ì²˜ë¦¬í•¨
+    if (newMode == TURN_MODE_LEFT) {
+        ok = can_send_turn_pulse(TURN_DIR_LEFT) && ok;
+        return ok;
+    }
+
+    if (newMode == TURN_MODE_RIGHT) {
+        ok = can_send_turn_pulse(TURN_DIR_RIGHT) && ok;
+        return ok;
+    }
+
+    // new OFF:
+    // ê¸°ì¡´ì— LEFT/RIGHTì˜€ìœ¼ë©´ ê°™ì€ ë°©í–¥ PULSE í•œ ë²ˆ ë” ë³´ë‚´ì„œ "í† ê¸€ OFF" ì‹œí‚´
+    if (prevMode == TURN_MODE_LEFT) {
+        ok = can_send_turn_pulse(TURN_DIR_LEFT) && ok;
+        return ok;
+    }
+
+    if (prevMode == TURN_MODE_RIGHT) {
+        ok = can_send_turn_pulse(TURN_DIR_RIGHT) && ok;
+        return ok;
+    }
+
+    if (prevMode == TURN_MODE_HAZARD) {
+        ok = can_send_hazard_set(false) && ok;
+        return ok;
+    }
+
+    return true;
+}
+
 
 static void canPollSensors()
 {
@@ -906,20 +1146,33 @@ static void canPollSensors()
             continue;
         }
 
-        if (rxMessage.identifier != CAN_DHT_ID) {
+        if (rxMessage.identifier == CAN_DHT_ID)
+        {
+            if (rxMessage.data_length_code < 4) {
+                continue;
+            }
+
+            int16_t humidity_x10 = (int16_t)((uint16_t)rxMessage.data[0] | ((uint16_t)rxMessage.data[1] << 8));
+            int16_t temp_x10 = (int16_t)((uint16_t)rxMessage.data[2] | ((uint16_t)rxMessage.data[3] << 8));
+
+            g_humidity = ((float)humidity_x10) / 10.0f;
+            g_temperature = ((float)temp_x10) / 10.0f;
+            g_lastSensorUpdateMs = millis();
             continue;
         }
 
-        if (rxMessage.data_length_code < 4) {
+        if (rxMessage.identifier == CAN_CDS_ID)
+        {
+            if (rxMessage.data_length_code < 2) {
+                continue;
+            }
+
+            uint16_t cdsAdc12 = (uint16_t)((uint16_t)rxMessage.data[0] | ((uint16_t)rxMessage.data[1] << 8));
+            g_cdsAdc = cdsAdc12;
+            g_hasCds = true;
+            g_lastCdsUpdateMs = millis();
             continue;
         }
-
-        int16_t humidity_x10 = (int16_t)((uint16_t)rxMessage.data[0] | ((uint16_t)rxMessage.data[1] << 8));
-        int16_t temp_x10 = (int16_t)((uint16_t)rxMessage.data[2] | ((uint16_t)rxMessage.data[3] << 8));
-
-        g_humidity = ((float)humidity_x10) / 10.0f;
-        g_temperature = ((float)temp_x10) / 10.0f;
-        g_lastSensorUpdateMs = millis();
     }
 }
 
@@ -929,11 +1182,12 @@ static void canPollSensors()
 static void mqtt_publish_state()
 {
     mqttClient.publish(g_topicWiperState, mode_to_string(g_wiperMode), true);
-    mqttClient.publish(g_topicHighState, mode_to_string(g_highMode), true);
+    mqttClient.publish(g_topicHighBeamState, mode_to_string(g_highBeamMode), true);
+    mqttClient.publish(g_topicHighStateCompat, mode_to_string(g_highBeamMode), true);
 }
 
 /* =========================
- * ¸ğµå Àû¿ë (SPI Á¦°Å, CAN ¸í·ÉÀº loop¿¡¼­ Ã³¸®)
+ * ëª¨ë“œ ì ìš© (SPI ì œê±°, CAN ëª…ë ¹ì€ loopì—ì„œ ì²˜ë¦¬)
  * ========================= */
 static void apply_wiper_mode(uint8_t newMode)
 {
@@ -945,25 +1199,43 @@ static void apply_wiper_mode(uint8_t newMode)
     Serial.printf("[APPLY] WIPER=%s\n", mode_to_string(g_wiperMode));
     mqtt_publish_state();
 
-    /* ¸ğµå ¹Ù²î¸é Áï½Ã Àç¼Û½Å À¯µµ */
+    /* ëª¨ë“œ ë°”ë€Œë©´ ì¦‰ì‹œ ì¬ì†¡ì‹  ìœ ë„ */
     g_lastSentSpeedLevel = 0xFF;
 }
 
-static void apply_high_mode(uint8_t newMode)
+static void apply_high_beam_mode(uint8_t newMode)
 {
-    if (g_highMode == newMode) {
+    if (g_highBeamMode == newMode) {
         return;
     }
 
-    g_highMode = newMode;
-    Serial.printf("[APPLY] HIGH=%s\n", mode_to_string(g_highMode));
+    g_highBeamMode = newMode;
+    Serial.printf("[APPLY] HIGH_BEAM=%s\n", mode_to_string(g_highBeamMode));
     mqtt_publish_state();
 
-    g_lastSentHighState = 0xFF;
+    g_lastSentHighBeamState = 0xFF;
+}
+
+
+static void apply_turn_mode(uint8_t newMode)
+{
+    if (newMode > TURN_MODE_HAZARD) {
+        newMode = TURN_MODE_HAZARD;
+    }
+
+    if (g_turnMode == newMode) {
+        return;
+    }
+
+    g_turnMode = newMode;
+    Serial.printf("[APPLY] TURN=%s", turn_mode_to_string(g_turnMode));
+
+    /* ëª¨ë“œ ë°”ë€Œë©´ ì¦‰ì‹œ ì¬ì†¡ì‹  ìœ ë„ */
+    g_lastSentTurnMode = 0xFF;
 }
 
 /* =========================
- * MQTT callback (Á¤È¯´Ô ±âÁ¸ À¯Áö)
+ * MQTT callback
  * ========================= */
 static void mqtt_callback(char* topic, byte* payload, unsigned int length)
 {
@@ -992,6 +1264,9 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length)
     }
 
     uint8_t newMode = MODE_AUTO;
+    Serial.printf("[MQTT-RX] topic=%s payload=%s len=%u ms=%lu\n",
+        topic, message, (unsigned)length, (unsigned long)millis());
+
     bool ok = parse_mode_payload(message, &newMode);
     if (ok == false) {
         Serial.printf("[MQTT] invalid payload: %s\n", message);
@@ -1004,15 +1279,15 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length)
         return;
     }
 
-    if (strcmp(topic, g_topicHighCmd) == 0) {
-        Serial.printf("[MQTT] HIGH=%s\n", mode_to_string(newMode));
-        apply_high_mode(newMode);
+    if (strcmp(topic, g_topicHighBeamCmd) == 0 || strcmp(topic, g_topicHighCmdCompat) == 0) {
+        Serial.printf("[MQTT] HIGH_BEAM=%s\n", mode_to_string(newMode));
+        apply_high_beam_mode(newMode);
         return;
     }
 }
 
 /* =========================
- * ÅäÇÈ »ı¼º (Á¤È¯´Ô ±âÁ¸ À¯Áö)
+ * í† í”½ ìƒì„±
  * ========================= */
 static void build_device_id_from_mac()
 {
@@ -1024,23 +1299,27 @@ static void build_device_id_from_mac()
 static void build_topics()
 {
     snprintf(g_topicWiperCmd, sizeof(g_topicWiperCmd), "%s/wiper/cmd/%s", TOPIC_BASE, g_deviceId);
-    snprintf(g_topicHighCmd, sizeof(g_topicHighCmd), "%s/high/cmd/%s", TOPIC_BASE, g_deviceId);
+    snprintf(g_topicHighBeamCmd, sizeof(g_topicHighBeamCmd), "%s/high_beam/cmd/%s", TOPIC_BASE, g_deviceId);
+    snprintf(g_topicHighCmdCompat, sizeof(g_topicHighCmdCompat), "%s/high/cmd/%s", TOPIC_BASE, g_deviceId);
 
     snprintf(g_topicWiperState, sizeof(g_topicWiperState), "%s/wiper/state/%s", TOPIC_BASE, g_deviceId);
-    snprintf(g_topicHighState, sizeof(g_topicHighState), "%s/high/state/%s", TOPIC_BASE, g_deviceId);
+    snprintf(g_topicHighBeamState, sizeof(g_topicHighBeamState), "%s/high_beam/state/%s", TOPIC_BASE, g_deviceId);
+    snprintf(g_topicHighStateCompat, sizeof(g_topicHighStateCompat), "%s/high/state/%s", TOPIC_BASE, g_deviceId);
 
     snprintf(g_topicOnline, sizeof(g_topicOnline), "%s/online/%s", TOPIC_BASE, g_deviceId);
 
     Serial.println("[TOPICS]");
     Serial.println(g_topicWiperCmd);
-    Serial.println(g_topicHighCmd);
+    Serial.println(g_topicHighBeamCmd);
+    Serial.println(g_topicHighCmdCompat);
     Serial.println(g_topicWiperState);
-    Serial.println(g_topicHighState);
+    Serial.println(g_topicHighBeamState);
+    Serial.println(g_topicHighStateCompat);
     Serial.println(g_topicOnline);
 }
 
 /* =========================
- * WiFi/MQTT connect (Á¤È¯´Ô ±âÁ¸ À¯Áö)
+ * WiFi/MQTT connect
  * ========================= */
 static void wifi_connect()
 {
@@ -1089,14 +1368,15 @@ static void mqtt_connect()
     }
 
     mqttClient.subscribe(g_topicWiperCmd);
-    mqttClient.subscribe(g_topicHighCmd);
+    mqttClient.subscribe(g_topicHighBeamCmd);
+    mqttClient.subscribe(g_topicHighCmdCompat);
 
     mqttClient.publish(g_topicOnline, "online", true);
     mqtt_publish_state();
 }
 
 /* =========================
- * Web API (°£´Ü À¯Áö)
+ * Web API
  * ========================= */
 static void web_handle_root()
 {
@@ -1106,11 +1386,31 @@ static void web_handle_root()
 static void web_handle_state()
 {
     String json = "{";
-    json += "\"deviceId\":\""; json += g_deviceId; json += "\",";
-    json += "\"topicBase\":\""; json += TOPIC_BASE; json += "\",";
-    json += "\"wiper\":\""; json += mode_to_string(g_wiperMode); json += "\",";
-    json += "\"high\":\"";  json += mode_to_string(g_highMode);  json += "\"";
+    json += "\"deviceId\":\"";
+    json += g_deviceId;
+    json += "\",";
 
+    json += "\"topicBase\":\"";
+    json += TOPIC_BASE;
+    json += "\",";
+
+    json += "\"wiper\":\"";
+    json += mode_to_string(g_wiperMode);
+    json += "\",";
+
+    /* í˜¸í™˜: high(êµ¬ë²„ì „) + high_beam(ì‹ ë²„ì „) ë‘˜ ë‹¤ ì œê³µ */
+    json += "\"high_beam\":\"";
+    json += mode_to_string(g_highBeamMode);
+    json += "\",";
+
+    json += "\"high\":\"";
+    json += mode_to_string(g_highBeamMode);
+    json += "\"";
+
+
+    json += ",\"turn\":\"";
+    json += turn_mode_to_string(g_turnMode);
+    json += "\"";
     if (isnan(g_temperature) == false) {
         json += ",\"temp\":";
         json += String(g_temperature, 1);
@@ -1121,9 +1421,15 @@ static void web_handle_state()
         json += String(g_humidity, 1);
     }
 
+    if (g_hasCds) {
+        json += ",\"cds\":";
+        json += String((unsigned)g_cdsAdc);
+    }
+
     json += "}";
     webServer.send(200, "application/json", json);
 }
+
 
 static void web_handle_set()
 {
@@ -1154,13 +1460,76 @@ static void web_handle_set()
         return;
     }
 
-    if (target == "high") {
-        apply_high_mode(newMode);
+    if (target == "high_beam" || target == "high") {
+        apply_high_beam_mode(newMode);
         webServer.send(200, "text/plain", "OK");
         return;
     }
 
-    webServer.send(400, "text/plain", "invalid target (wiper/high)");
+    webServer.send(400, "text/plain", "invalid target (wiper/high_beam)");
+}
+
+static void web_handle_turn()
+{
+    if (webServer.hasArg("mode") == false) {
+        webServer.send(400, "text/plain", "missing mode");
+        return;
+    }
+
+    String modeStr = webServer.arg("mode");
+    modeStr.toUpperCase();
+
+    uint8_t newMode = TURN_MODE_OFF;
+    bool ok = parse_turn_mode_query(modeStr.c_str(), &newMode);
+    if (ok == false) {
+        webServer.send(400, "text/plain", "invalid mode (OFF/LEFT/RIGHT/HAZARD)");
+        return;
+    }
+
+    uint8_t oldMode = g_turnMode;   // â˜… ì¤‘ìš”: ì´ì „ ìƒíƒœ ê¸°ì–µ
+    apply_turn_mode(newMode);
+
+    // 1) hazard -> ë‹¤ë¥¸ ëª¨ë“œë¡œ ê°ˆ ë•ŒëŠ” hazardë¶€í„° ë”(ì•ˆì „)
+    if (oldMode == TURN_MODE_HAZARD && newMode != TURN_MODE_HAZARD) {
+        can_send_hazard_set(false);
+    }
+
+    // 2) ìƒˆ ëª¨ë“œì— ë§ê²Œ CONTROLì´ ì´í•´í•˜ëŠ” í”„ë ˆì„ ì „ì†¡
+    if (newMode == TURN_MODE_HAZARD) {
+        can_send_hazard_set(true);
+        g_lastSentTurnMode = g_turnMode;
+        webServer.send(200, "text/plain", "OK");
+        return;
+    }
+
+    if (newMode == TURN_MODE_LEFT) {
+        can_send_turn_pulse(TURN_DIR_LEFT);   // ì‹œì‘(ë˜ ëˆ„ë¥´ë©´ CONTROLì´ ìì²´ì ìœ¼ë¡œ OFF ì²˜ë¦¬)
+        g_lastSentTurnMode = g_turnMode;
+        webServer.send(200, "text/plain", "OK");
+        return;
+    }
+
+    if (newMode == TURN_MODE_RIGHT) {
+        can_send_turn_pulse(TURN_DIR_RIGHT);
+        g_lastSentTurnMode = g_turnMode;
+        webServer.send(200, "text/plain", "OK");
+        return;
+    }
+
+    // newMode == OFF
+    // OFFëŠ” "ì´ì „ ëª¨ë“œ"ì— ë”°ë¼ ë„ëŠ” ë°©ì‹ìœ¼ë¡œ í† ê¸€ 1ë²ˆ ë” ë³´ë‚´ì¤Œ
+    if (oldMode == TURN_MODE_LEFT) {
+        can_send_turn_pulse(TURN_DIR_LEFT);   // í† ê¸€ OFF
+    }
+    else if (oldMode == TURN_MODE_RIGHT) {
+        can_send_turn_pulse(TURN_DIR_RIGHT);  // í† ê¸€ OFF
+    }
+    else if (oldMode == TURN_MODE_HAZARD) {
+        can_send_hazard_set(false);
+    }
+
+    g_lastSentTurnMode = g_turnMode;
+    webServer.send(200, "text/plain", "OK");
 }
 
 static void web_setup_routes()
@@ -1168,13 +1537,15 @@ static void web_setup_routes()
     webServer.on("/", HTTP_GET, web_handle_root);
     webServer.on("/api/state", HTTP_GET, web_handle_state);
     webServer.on("/api/set", HTTP_GET, web_handle_set);
+    webServer.on("/api/turn", HTTP_GET, web_handle_turn);
     webServer.begin();
     Serial.println("[WEB] started on port 80");
 }
 
 /* =========================
- * AUTO ÆÇ´Ü / ¸í·É »ı¼º
+ * AUTO íŒë‹¨ / ëª…ë ¹ ìƒì„±
  * ========================= */
+
 static uint8_t compute_wiper_speed_from_humidity(float humidity)
 {
     if (isnan(humidity)) {
@@ -1196,10 +1567,43 @@ static uint8_t compute_wiper_speed_from_humidity(float humidity)
     return kSpeedLevelStop;
 }
 
+static uint8_t compute_high_beam_state_from_cds(uint16_t cdsAdc, bool hasCds, uint8_t currentState)
+{
+    if (hasCds == false) {
+        return 0;
+    }
+
+    uint8_t nextState = (currentState != 0U) ? 1U : 0U;
+
+    if (kCdsDarkIsHighAdc) {
+        if (cdsAdc >= kCdsOnThresholdAdc) {
+            nextState = 1U;
+        }
+
+        if (cdsAdc <= kCdsOffThresholdAdc) {
+            nextState = 0U;
+        }
+
+        return nextState;
+    }
+
+    /* bright -> high ADC, dark -> low ADC */
+    if (cdsAdc <= kCdsOnThresholdAdc) {
+        nextState = 1U;
+    }
+
+    if (cdsAdc >= kCdsOffThresholdAdc) {
+        nextState = 0U;
+    }
+
+    return nextState;
+}
+
+
 static void controlLoopOnce()
 {
     uint8_t desiredSpeedLevel = g_lastSentSpeedLevel;
-    uint8_t desiredHighState = g_lastSentHighState;
+    uint8_t desiredHighBeamState = g_lastSentHighBeamState;
 
     /* WIPER */
     if (g_wiperMode == MODE_AUTO) {
@@ -1216,35 +1620,55 @@ static void controlLoopOnce()
         desiredSpeedLevel = kSpeedLevelFast;
     }
 
-    /* HIGH */
-    if (g_highMode == MODE_AUTO) {
-        /* Á¶µµ ¼¾¼­°¡ ¾øÀ¸´Ï ±âº» OFF
-           ÇÊ¿ä ½Ã ¼¾¼­ CAN ID Ãß°¡ ÈÄ ¿©±â¼­ ÆÇ´Ü */
-        desiredHighState = 0;
+    /* HIGH_BEAM */
+    if (g_highBeamMode == MODE_AUTO) {
+        desiredHighBeamState = compute_high_beam_state_from_cds(g_cdsAdc, g_hasCds, g_lastSentHighBeamState);
     }
-    else if (g_highMode == MODE_ON) {
-        desiredHighState = 1;
+    else if (g_highBeamMode == MODE_ON) {
+        desiredHighBeamState = 1U;
     }
-    else if (g_highMode == MODE_OFF) {
-        desiredHighState = 0;
+    else if (g_highBeamMode == MODE_OFF) {
+        desiredHighBeamState = 0U;
+    }
+    /* TURN (Right/Left/Emergency) */
+    uint8_t desiredTurnMode = g_turnMode;
+    if (desiredTurnMode > TURN_MODE_HAZARD) {
+        desiredTurnMode = TURN_MODE_HAZARD;
     }
 
-    /* º¯°æ ½Ã¸¸ ¼Û½Å */
+
+
+    /* ë³€ê²½ ì‹œì—ë§Œ ì†¡ì‹  */
     if (g_lastSentSpeedLevel != desiredSpeedLevel) {
-        g_lastSentSpeedLevel = desiredSpeedLevel;
-        can_send_servo_speed(g_lastSentSpeedLevel);
-
-        Serial.printf("[TX] SERVO speed_level=%u (H=%.1f T=%.1f)\n",
-            (unsigned)g_lastSentSpeedLevel,
-            (double)g_humidity,
-            (double)g_temperature);
+        bool ok = can_send_servo_speed(desiredSpeedLevel);
+        if (ok) {
+            g_lastSentSpeedLevel = desiredSpeedLevel;
+            Serial.printf("[TX] SERVO speed_level=%u (H=%.1f T=%.1f)\n",
+                (unsigned)g_lastSentSpeedLevel,
+                (double)g_humidity,
+                (double)g_temperature);
+        }
     }
 
-    if (g_lastSentHighState != desiredHighState) {
-        g_lastSentHighState = desiredHighState;
-        can_send_high_state(g_lastSentHighState);
+    if (g_lastSentHighBeamState != desiredHighBeamState) {
+        bool ok = can_send_high_beam_state(desiredHighBeamState);
+        if (ok) {
+            g_lastSentHighBeamState = desiredHighBeamState;
+            Serial.printf("[TX] HIGH_BEAM state=%u (CDS=%u)\n",
+                (unsigned)g_lastSentHighBeamState,
+                (unsigned)g_cdsAdc);
+        }
+    }
 
-        Serial.printf("[TX] HIGH state=%u\n", (unsigned)g_lastSentHighState);
+
+    if (g_lastSentTurnMode != desiredTurnMode) {
+        uint8_t prevMode = g_lastSentTurnMode;
+
+        bool ok = send_turn_transition(prevMode, desiredTurnMode);
+        if (ok) {
+            g_lastSentTurnMode = desiredTurnMode;
+            Serial.printf("[TX] TURN mode=%s\n", turn_mode_to_string(g_lastSentTurnMode));
+        }
     }
 }
 
@@ -1267,9 +1691,10 @@ void setup()
 
     web_setup_routes();
 
-    /* ºÎÆÃ Á÷ÈÄ 1È¸ °­Á¦ ¼Û½Å */
+    /* ë¶€íŒ… ì§í›„ 1íšŒ ê°•ì œ ì†¡ì‹  */
     g_lastSentSpeedLevel = 0xFF;
-    g_lastSentHighState = 0xFF;
+    g_lastSentHighBeamState = 0xFF;
+    g_lastSentTurnMode = 0xFF;
     controlLoopOnce();
 }
 
@@ -1288,7 +1713,7 @@ void loop()
 
     canPollSensors();
 
-    /* 100ms¸¶´Ù AUTO/¼öµ¿ ÆÇ´Ü + ÇÊ¿äÇÑ ¸í·É ¼Û½Å */
+    /* 100msë§ˆë‹¤ AUTO/ìˆ˜ë™ íŒë‹¨ + í•„ìš”í•œ ëª…ë ¹ ì†¡ì‹  */
     static uint32_t lastControlMs = 0;
     uint32_t nowMs = millis();
     if ((nowMs - lastControlMs) >= 100) {
@@ -1296,17 +1721,21 @@ void loop()
         controlLoopOnce();
     }
 
-    /* À¯½Ç ´ëºñ 2ÃÊ¸¶´Ù ÇöÀç ¸í·É Àç¼Û½Å(¼±ÅÃ) */
+    /* ìœ ì‹¤ ëŒ€ë¹„ 2ì´ˆë§ˆë‹¤ í˜„ì¬ ëª…ë ¹ ì¬ì†¡ì‹ (ì„ íƒ) */
     static uint32_t lastResendMs = 0;
     if ((nowMs - lastResendMs) >= 2000) {
         lastResendMs = nowMs;
 
         if (g_lastSentSpeedLevel != 0xFF) {
-            can_send_servo_speed(g_lastSentSpeedLevel);
+            if (can_send_servo_speed(g_lastSentSpeedLevel) == false) {
+                Serial.println("[CAN-TX-FAIL] resend SERVO");
+            }
         }
 
-        if (g_lastSentHighState != 0xFF) {
-            can_send_high_state(g_lastSentHighState);
+        if (g_lastSentHighBeamState != 0xFF) {
+            if (can_send_high_beam_state(g_lastSentHighBeamState) == false) {
+                Serial.println("[CAN-TX-FAIL] resend HIGH_BEAM");
+            }
         }
     }
 

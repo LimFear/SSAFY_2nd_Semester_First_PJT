@@ -136,3 +136,21 @@ ex)
         servo_motor - 17
         CAN_RX - 32
         CAN_TX - 33
+
+(26/02/03) 01. 임정환[구현 성공] 
+- ESP32 끼리 Target Git 구현 완료
+    1. send GPIO 
+    DHT - 16
+    CDS - 34
+
+    2. control GPIO
+    servo_motor - 17
+    Left LED - 18
+    Right LED - 22
+    High beam LED - 19, 21
+    Back LED - 23
+    
+    3. Common GPIO
+    CAN_RX - 32
+    CAN_TX - 33
+
