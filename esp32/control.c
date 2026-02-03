@@ -1,129 +1,211 @@
 #include <Arduino.h>
 #include "driver/twai.h"
 
-/* ===== CAN 핀 ===== */
-#define CAN_RX_GPIO_PIN GPIO_NUM_32
-#define CAN_TX_GPIO_PIN GPIO_NUM_33
+/* =========================
+ * 핀 매핑 (CONTROL node)
+ * ========================= */
+#define CAN_RX_GPIO_PIN         GPIO_NUM_32
+#define CAN_TX_GPIO_PIN         GPIO_NUM_33
 
-/* ===== 서보 핀 ===== */
-#define SERVO_GPIO_PIN  (GPIO_NUM_17)
+#define SERVO_GPIO_PIN          GPIO_NUM_17
 
-/* ===== HIGH 출력 핀 ===== */
-#define HIGH_GPIO_PIN   (GPIO_NUM_27)
+ /* High-beam "출력" 핀 (릴레이/트랜지스터 등) */
+#define HIGH_OUTPUT_GPIO_PIN    GPIO_NUM_27
 
-/* ===== CAN 프로토콜 ===== */
-#define CAN_ID_CMD_SERVO        0x200
-#define SERVO_CMD_SET_ANGLE     0x01
+/* 상태/램프 핀 (LED0~LED4 역할 재정의) */
+#define PIN_TURN_RIGHT          GPIO_NUM_18   /* Right */
+#define PIN_HIGH_INDICATOR_A    GPIO_NUM_19   /* High beam indicator */
+#define PIN_HIGH_INDICATOR_B    GPIO_NUM_21   /* High beam indicator */
+#define PIN_TURN_LEFT           GPIO_NUM_22   /* Left */
+#define PIN_EMERGENCY_INDICATOR GPIO_NUM_23   /* Emergency indicator */
 
-#define CAN_ID_CMD_HIGH         0x210
-#define HIGH_CMD_SET_STATE      0x11
+/* =========================
+ * 출력 논리 (Active-Low 기준)
+ * - true  : LOW=ON, HIGH=OFF (애노드 스타일)
+ * - false : HIGH=ON, LOW=OFF (캐소드 스타일)
+ * ========================= */
+static const bool kOutputActiveLow = true;
 
-/* ===== 속도 레벨 ===== */
-static const uint8_t kSpeedLevelStop = 0;
-static const uint8_t kSpeedLevelSlow = 1;
-static const uint8_t kSpeedLevelNormal = 2;
-static const uint8_t kSpeedLevelFast = 3;
+static uint8_t outputLevelOn()
+{
+    if (kOutputActiveLow) {
+        return LOW;
+    }
+    return HIGH;
+}
 
-/* ===== 서보 최대 각도 ===== */
-static const uint8_t kMaxAngleLimit = 125;
+static uint8_t outputLevelOff()
+{
+    if (kOutputActiveLow) {
+        return HIGH;
+    }
+    return LOW;
+}
 
-/* ===== LEDC(서보 PWM) 설정 ===== */
-static const int kPwmFreqHz = 50;
-static const int kPwmResolutionBits = 16;
+static void writeOutput(gpio_num_t pin, bool on)
+{
+    if (on) {
+        digitalWrite((int)pin, outputLevelOn());
+        return;
+    }
+    digitalWrite((int)pin, outputLevelOff());
+}
 
-/* ===== 서보 속도 튜닝 ===== */
-static const uint8_t kStepSweepSlowDeg = 3;
-static const uint8_t kStepSweepNormalDeg = 5;
-static const uint8_t kStepSweepFastDeg = 8;
+/* =========================
+ * CAN 프로토콜
+ * ========================= */
+#define CAN_ID_CMD_SERVO            0x200
+#define SERVO_CMD_SET_SPEED_LEVEL   0x01
+
+#define CAN_ID_CMD_HIGH_BEAM        0x210
+#define HIGH_BEAM_CMD_SET_STATE     0x11
+
+#define CAN_ID_CMD_TURN             0x220
+#define TURN_CMD_PULSE              0x31   /* data[1]=dir */
+#define TURN_CMD_HAZARD_SET         0x32   /* data[1]=0/1 */
+#define TURN_DIR_LEFT               0x00
+#define TURN_DIR_RIGHT              0x01
+
+ /* =========================
+  * 속도 레벨
+  * ========================= */
+static const uint8_t kSpeedStop = 0;
+static const uint8_t kSpeedSlow = 1;
+static const uint8_t kSpeedNormal = 2;
+static const uint8_t kSpeedFast = 3;
+
+/* =========================
+ * 서보 설정
+ * ========================= */
+static const uint8_t  kServoMaxAngleDeg = 125;
+
+static const int      kServoPwmFreqHz = 50;
+static const int      kServoPwmResolutionBits = 16;
+
+static const uint8_t  kSweepStepSlowDeg = 3;
+static const uint8_t  kSweepStepNormalDeg = 5;
+static const uint8_t  kSweepStepFastDeg = 8;
 
 static const uint32_t kDwellSlowMs = 120;
 static const uint32_t kDwellNormalMs = 80;
 static const uint32_t kDwellFastMs = 40;
 
-static const uint8_t kStepStopDeg = 10;
-static const uint32_t kFrameDelayMs = 20;
+static const uint8_t  kReturnStepDeg = 10;
+static const uint32_t kServoFrameDelayMs = 20;
 
-/* ===== 현재 목표 출력 ===== */
-static volatile uint8_t g_targetSpeedLevel = kSpeedLevelStop;
-static volatile uint8_t g_targetHighState = 0;
+/* =========================
+ * Turn/Hazard 설정
+ * ========================= */
+static const uint32_t kTurnPulseMs = 800;        /* Right/Left: 0.8초 펄스 */
+static const uint32_t kHazardToggleMs = 800;     /* Emergency: 0.8초 토글 */
 
-/* ===== 서보 상태 ===== */
+/* =========================
+ * 전역 상태
+ * ========================= */
+static volatile uint8_t g_targetServoSpeedLevel = kSpeedStop;
+static volatile uint8_t g_targetHighBeamState = 0;
+
+/* RX 디버그 카운터 */
+static uint32_t g_rxCountTotal = 0;
+static uint32_t g_rxCountServo = 0;
+static uint32_t g_rxCountHighBeam = 0;
+static uint32_t g_rxCountTurn = 0;
+static uint32_t g_rxCountOther = 0;
+
+/* =========================
+ * 서보 스윕 상태
+ * ========================= */
 typedef struct
 {
-    uint8_t currentAngleDeg;
-    bool goingUp;
+    uint8_t  currentAngleDeg;
+    bool     goingUp;
     uint32_t nextStepMs;
     uint32_t dwellUntilMs;
-    uint8_t maxAngleDeg;
+    uint8_t  maxAngleDeg;
 } ServoSweepState_t;
 
 static ServoSweepState_t g_servo = { 0 };
 
-static uint32_t servoDutyFromPulseUs(uint32_t pulse_us)
-{
-    const uint32_t period_us = 20000U;
+/* =========================
+ * Turn/Hazard 상태
+ * ========================= */
+static volatile bool g_hazardEnabled = false;
+static uint32_t g_leftPulseUntilMs = 0;
+static uint32_t g_rightPulseUntilMs = 0;
 
-    if (pulse_us > period_us) {
-        pulse_us = period_us;
+static bool g_hazardPhaseOn = false;
+static uint32_t g_hazardNextToggleMs = 0;
+
+static bool g_turnPhaseOn = false;
+
+/* =========================
+ * 서보 유틸
+ * ========================= */
+static uint32_t servoDutyFromPulseUs(uint32_t pulseUs)
+{
+    const uint32_t periodUs = 20000U;
+
+    if (pulseUs > periodUs) {
+        pulseUs = periodUs;
     }
 
-    const uint32_t maxDuty = (1U << kPwmResolutionBits) - 1U;
-    uint32_t duty = (pulse_us * maxDuty) / period_us;
+    const uint32_t maxDuty = (1U << kServoPwmResolutionBits) - 1U;
+    uint32_t duty = (pulseUs * maxDuty) / periodUs;
     return duty;
 }
 
-static uint32_t pulseUsFromAngle(uint8_t angle_deg)
+static uint32_t servoPulseUsFromAngle(uint8_t angleDeg)
 {
-    if (angle_deg > 180U) {
-        angle_deg = 180U;
+    if (angleDeg > 180U) {
+        angleDeg = 180U;
     }
 
-    const uint32_t min_us = 500U;
-    const uint32_t max_us = 2500U;
+    const uint32_t minUs = 500U;
+    const uint32_t maxUs = 2500U;
 
-    uint32_t pulse = min_us + (uint32_t)((max_us - min_us) * angle_deg) / 180U;
+    uint32_t pulse = minUs + (uint32_t)((maxUs - minUs) * angleDeg) / 180U;
     return pulse;
 }
 
 static void servoInit()
 {
-    bool ok = ledcAttach((int)SERVO_GPIO_PIN, kPwmFreqHz, kPwmResolutionBits);
+    bool ok = ledcAttach((int)SERVO_GPIO_PIN, kServoPwmFreqHz, kServoPwmResolutionBits);
     if (ok == false) {
         Serial.println("LEDC attach failed");
     }
 }
 
-static void servoWriteAngle(uint8_t angle_deg)
+static void servoWriteAngle(uint8_t angleDeg)
 {
-    uint32_t pulse = pulseUsFromAngle(angle_deg);
-    uint32_t duty = servoDutyFromPulseUs(pulse);
+    uint32_t pulseUs = servoPulseUsFromAngle(angleDeg);
+    uint32_t duty = servoDutyFromPulseUs(pulseUs);
 
     ledcWrite((int)SERVO_GPIO_PIN, duty);
 }
 
-static uint8_t stepDegFromSpeedLevel(uint8_t speedLevel)
+static uint8_t sweepStepDegFromSpeed(uint8_t speedLevel)
 {
-    if (speedLevel == kSpeedLevelSlow) {
-        return kStepSweepSlowDeg;
+    if (speedLevel == kSpeedSlow) {
+        return kSweepStepSlowDeg;
     }
-    if (speedLevel == kSpeedLevelNormal) {
-        return kStepSweepNormalDeg;
+    if (speedLevel == kSpeedNormal) {
+        return kSweepStepNormalDeg;
     }
-    if (speedLevel == kSpeedLevelFast) {
-        return kStepSweepFastDeg;
+    if (speedLevel == kSpeedFast) {
+        return kSweepStepFastDeg;
     }
-    return kStepSweepNormalDeg;
+    return kSweepStepNormalDeg;
 }
 
-static uint32_t dwellDelayMsFromSpeedLevel(uint8_t speedLevel)
+static uint32_t dwellDelayMsFromSpeed(uint8_t speedLevel)
 {
-    if (speedLevel == kSpeedLevelSlow) {
+    if (speedLevel == kSpeedSlow) {
         return kDwellSlowMs;
     }
-    if (speedLevel == kSpeedLevelNormal) {
+    if (speedLevel == kSpeedNormal) {
         return kDwellNormalMs;
     }
-    if (speedLevel == kSpeedLevelFast) {
+    if (speedLevel == kSpeedFast) {
         return kDwellFastMs;
     }
     return kDwellNormalMs;
@@ -135,21 +217,9 @@ static void servoControllerInit()
     g_servo.goingUp = true;
     g_servo.nextStepMs = 0;
     g_servo.dwellUntilMs = 0;
-    g_servo.maxAngleDeg = kMaxAngleLimit;
+    g_servo.maxAngleDeg = kServoMaxAngleDeg;
 
     servoWriteAngle(g_servo.currentAngleDeg);
-}
-
-static void applyHighState(uint8_t highState)
-{
-    uint8_t newState = (highState != 0U) ? 1U : 0U;
-
-    if (newState != 0U) {
-        digitalWrite((int)HIGH_GPIO_PIN, HIGH);
-        return;
-    }
-
-    digitalWrite((int)HIGH_GPIO_PIN, LOW);
 }
 
 static void servoUpdate(uint32_t nowMs)
@@ -162,18 +232,18 @@ static void servoUpdate(uint32_t nowMs)
         return;
     }
 
-    g_servo.nextStepMs = nowMs + kFrameDelayMs;
+    g_servo.nextStepMs = nowMs + kServoFrameDelayMs;
 
-    uint8_t speedLevel = g_targetSpeedLevel;
+    uint8_t speedLevel = g_targetServoSpeedLevel;
 
-    if (speedLevel == kSpeedLevelStop)
+    if (speedLevel == kSpeedStop)
     {
         if (g_servo.currentAngleDeg == 0U) {
             return;
         }
 
-        if (g_servo.currentAngleDeg > kStepStopDeg) {
-            g_servo.currentAngleDeg = (uint8_t)(g_servo.currentAngleDeg - kStepStopDeg);
+        if (g_servo.currentAngleDeg > kReturnStepDeg) {
+            g_servo.currentAngleDeg = (uint8_t)(g_servo.currentAngleDeg - kReturnStepDeg);
         }
         else {
             g_servo.currentAngleDeg = 0U;
@@ -183,13 +253,13 @@ static void servoUpdate(uint32_t nowMs)
         return;
     }
 
-    uint8_t stepSweepDeg = stepDegFromSpeedLevel(speedLevel);
-    uint32_t dwellMs = dwellDelayMsFromSpeedLevel(speedLevel);
+    uint8_t stepDeg = sweepStepDegFromSpeed(speedLevel);
+    uint32_t dwellMs = dwellDelayMsFromSpeed(speedLevel);
 
     if (g_servo.goingUp)
     {
-        uint16_t next = (uint16_t)g_servo.currentAngleDeg + (uint16_t)stepSweepDeg;
-        if (next >= g_servo.maxAngleDeg)
+        uint16_t nextAngle = (uint16_t)g_servo.currentAngleDeg + (uint16_t)stepDeg;
+        if (nextAngle >= g_servo.maxAngleDeg)
         {
             g_servo.currentAngleDeg = g_servo.maxAngleDeg;
             g_servo.goingUp = false;
@@ -199,13 +269,13 @@ static void servoUpdate(uint32_t nowMs)
             return;
         }
 
-        g_servo.currentAngleDeg = (uint8_t)next;
+        g_servo.currentAngleDeg = (uint8_t)nextAngle;
         servoWriteAngle(g_servo.currentAngleDeg);
         return;
     }
 
     /* going down */
-    if (g_servo.currentAngleDeg <= stepSweepDeg)
+    if (g_servo.currentAngleDeg <= stepDeg)
     {
         g_servo.currentAngleDeg = 0U;
         g_servo.goingUp = true;
@@ -215,10 +285,173 @@ static void servoUpdate(uint32_t nowMs)
         return;
     }
 
-    g_servo.currentAngleDeg = (uint8_t)(g_servo.currentAngleDeg - stepSweepDeg);
+    g_servo.currentAngleDeg = (uint8_t)(g_servo.currentAngleDeg - stepDeg);
     servoWriteAngle(g_servo.currentAngleDeg);
 }
 
+/* =========================
+ * 램프/표시 초기화
+ * ========================= */
+static void lampsInit()
+{
+    pinMode((int)PIN_TURN_RIGHT, OUTPUT);
+    pinMode((int)PIN_TURN_LEFT, OUTPUT);
+    pinMode((int)PIN_EMERGENCY_INDICATOR, OUTPUT);
+    pinMode((int)PIN_HIGH_INDICATOR_A, OUTPUT);
+    pinMode((int)PIN_HIGH_INDICATOR_B, OUTPUT);
+
+    writeOutput(PIN_TURN_RIGHT, false);
+    writeOutput(PIN_TURN_LEFT, false);
+    writeOutput(PIN_EMERGENCY_INDICATOR, false);
+    writeOutput(PIN_HIGH_INDICATOR_A, false);
+    writeOutput(PIN_HIGH_INDICATOR_B, false);
+}
+
+static void applyHighBeamIndicators(uint8_t highBeamState)
+{
+    bool on = false;
+    if (highBeamState != 0U) {
+        on = true;
+    }
+
+    writeOutput(PIN_HIGH_INDICATOR_A, on);
+    writeOutput(PIN_HIGH_INDICATOR_B, on);
+}
+
+static void applyHighBeamOutput(uint8_t highBeamState)
+{
+    bool on = false;
+    if (highBeamState != 0U) {
+        on = true;
+    }
+
+    /* 출력 핀도 같은 Active-Low 기준으로 처리 */
+    writeOutput(HIGH_OUTPUT_GPIO_PIN, on);
+}
+
+/* =========================
+ * Turn/Hazard 로직 (CONTROL node에서 실제 핀 토글)
+ * ========================= */
+static void setHazardEnabled(bool enabled, uint32_t nowMs)
+{
+    g_hazardEnabled = enabled;
+
+    g_leftPulseUntilMs = 0;
+    g_rightPulseUntilMs = 0;
+    g_turnPhaseOn = false;
+
+    if (enabled) {
+        g_hazardPhaseOn = true;
+        g_hazardNextToggleMs = nowMs + kHazardToggleMs;
+
+        writeOutput(PIN_TURN_RIGHT, true);
+        writeOutput(PIN_TURN_LEFT, true);
+        writeOutput(PIN_EMERGENCY_INDICATOR, true);
+        return;
+    }
+
+    g_hazardPhaseOn = false;
+
+    writeOutput(PIN_TURN_RIGHT, false);
+    writeOutput(PIN_TURN_LEFT, false);
+    writeOutput(PIN_EMERGENCY_INDICATOR, false);
+}
+
+static void startLeftPulse(uint32_t nowMs)
+{
+    if (g_hazardEnabled) {
+        return;
+    }
+
+    /* 같은 방향을 또 누르면 OFF */
+    if (g_leftPulseUntilMs != 0U) {
+        g_leftPulseUntilMs = 0U;
+        g_turnPhaseOn = false;
+        writeOutput(PIN_TURN_LEFT, false);
+        return;
+    }
+
+    /* 좌 시작: 우는 끄고 좌 점멸 시작 */
+    g_rightPulseUntilMs = 0U;
+    writeOutput(PIN_TURN_RIGHT, false);
+
+    g_turnPhaseOn = true;                 // 시작은 ON
+    g_leftPulseUntilMs = nowMs + kTurnPulseMs;   // 다음 토글 시각
+    writeOutput(PIN_TURN_LEFT, true);
+}
+
+
+static void startRightPulse(uint32_t nowMs)
+{
+    if (g_hazardEnabled) {
+        return;
+    }
+
+    /* 같은 방향을 또 누르면 OFF */
+    if (g_rightPulseUntilMs != 0U) {
+        g_rightPulseUntilMs = 0U;
+        g_turnPhaseOn = false;
+        writeOutput(PIN_TURN_RIGHT, false);
+        return;
+    }
+
+    /* 우 시작: 좌는 끄고 우 점멸 시작 */
+    g_leftPulseUntilMs = 0U;
+    writeOutput(PIN_TURN_LEFT, false);
+
+    g_turnPhaseOn = true;
+    g_rightPulseUntilMs = nowMs + kTurnPulseMs;
+    writeOutput(PIN_TURN_RIGHT, true);
+}
+
+
+static void signalsUpdate(uint32_t nowMs)
+{
+    if (g_hazardEnabled)
+    {
+        if (nowMs >= g_hazardNextToggleMs) {
+            g_hazardNextToggleMs = nowMs + kHazardToggleMs;
+            g_hazardPhaseOn = !g_hazardPhaseOn;
+
+            writeOutput(PIN_TURN_RIGHT, g_hazardPhaseOn);
+            writeOutput(PIN_TURN_LEFT, g_hazardPhaseOn);
+            writeOutput(PIN_EMERGENCY_INDICATOR, g_hazardPhaseOn);
+        }
+        return;
+    }
+
+
+    if (g_leftPulseUntilMs != 0U || g_rightPulseUntilMs != 0U)
+    {
+        uint32_t* nextToggleMs = (g_leftPulseUntilMs != 0U) ? &g_leftPulseUntilMs : &g_rightPulseUntilMs;
+
+        if (nowMs >= *nextToggleMs) {
+            *nextToggleMs = nowMs + kTurnPulseMs;
+            g_turnPhaseOn = !g_turnPhaseOn;
+        }
+
+        if (g_leftPulseUntilMs != 0U) {
+            writeOutput(PIN_TURN_LEFT, g_turnPhaseOn);
+            writeOutput(PIN_TURN_RIGHT, false);
+        }
+        else {
+            writeOutput(PIN_TURN_RIGHT, g_turnPhaseOn);
+            writeOutput(PIN_TURN_LEFT, false);
+        }
+
+        writeOutput(PIN_EMERGENCY_INDICATOR, false);
+        return;
+    }
+
+    /* 아무 것도 아니면 전부 OFF */
+    writeOutput(PIN_TURN_LEFT, false);
+    writeOutput(PIN_TURN_RIGHT, false);
+    writeOutput(PIN_EMERGENCY_INDICATOR, false);
+}
+
+/* =========================
+ * CAN init / poll
+ * ========================= */
 static bool canInit()
 {
     twai_general_config_t generalConfig =
@@ -257,6 +490,8 @@ static void canPollCommands()
             continue;
         }
 
+        g_rxCountTotal++;
+
         if (rxMessage.identifier == CAN_ID_CMD_SERVO)
         {
             if (rxMessage.data_length_code < 2) {
@@ -266,21 +501,22 @@ static void canPollCommands()
             uint8_t command = rxMessage.data[0];
             uint8_t speedLevel = rxMessage.data[1];
 
-            if (command != SERVO_CMD_SET_ANGLE) {
+            if (command != SERVO_CMD_SET_SPEED_LEVEL) {
                 continue;
             }
 
-            if (speedLevel > kSpeedLevelFast) {
-                speedLevel = kSpeedLevelFast;
+            if (speedLevel > kSpeedFast) {
+                speedLevel = kSpeedFast;
             }
 
-            g_targetSpeedLevel = speedLevel;
+            g_targetServoSpeedLevel = speedLevel;
 
-            Serial.printf("[RX] SERVO speed_level=%u\n", (unsigned)g_targetSpeedLevel);
+            g_rxCountServo++;
+            Serial.printf("[RX] SERVO speed_level=%u\n", (unsigned)g_targetServoSpeedLevel);
             continue;
         }
 
-        if (rxMessage.identifier == CAN_ID_CMD_HIGH)
+        if (rxMessage.identifier == CAN_ID_CMD_HIGH_BEAM)
         {
             if (rxMessage.data_length_code < 2) {
                 continue;
@@ -289,15 +525,57 @@ static void canPollCommands()
             uint8_t command = rxMessage.data[0];
             uint8_t highState = rxMessage.data[1];
 
-            if (command != HIGH_CMD_SET_STATE) {
+            if (command != HIGH_BEAM_CMD_SET_STATE) {
                 continue;
             }
 
-            g_targetHighState = (highState != 0U) ? 1U : 0U;
+            g_targetHighBeamState = (highState != 0U) ? 1U : 0U;
 
-            Serial.printf("[RX] HIGH state=%u\n", (unsigned)g_targetHighState);
+            g_rxCountHighBeam++;
+            Serial.printf("[RX] HIGH_BEAM state=%u\n", (unsigned)g_targetHighBeamState);
             continue;
         }
+
+        if (rxMessage.identifier == CAN_ID_CMD_TURN)
+        {
+            if (rxMessage.data_length_code < 2) {
+                continue;
+            }
+
+            uint8_t command = rxMessage.data[0];
+            uint8_t value = rxMessage.data[1];
+            uint32_t nowMs = millis();
+
+            if (command == TURN_CMD_PULSE) {
+                if (value == TURN_DIR_LEFT) {
+                    startLeftPulse(nowMs);
+                    Serial.println("[RX] TURN left pulse");
+                    g_rxCountTurn++;
+                }
+                else if (value == TURN_DIR_RIGHT) {
+                    startRightPulse(nowMs);
+                    Serial.println("[RX] TURN right pulse");
+                    g_rxCountTurn++;
+                }
+                continue;
+            }
+
+            if (command == TURN_CMD_HAZARD_SET) {
+                bool enabled = false;
+                if (value != 0U) {
+                    enabled = true;
+                }
+                setHazardEnabled(enabled, nowMs);
+                Serial.printf("[RX] HAZARD enabled=%u\n", enabled ? 1 : 0);
+                g_rxCountTurn++;
+                continue;
+            }
+
+            g_rxCountOther++;
+            continue;
+        }
+
+        g_rxCountOther++;
     }
 }
 
@@ -307,8 +585,10 @@ void setup()
     delay(300);
     Serial.println("\nBOOT (CONTROL node)");
 
-    pinMode((int)HIGH_GPIO_PIN, OUTPUT);
-    digitalWrite((int)HIGH_GPIO_PIN, LOW);
+    pinMode((int)HIGH_OUTPUT_GPIO_PIN, OUTPUT);
+    writeOutput(HIGH_OUTPUT_GPIO_PIN, false);
+
+    lampsInit();
 
     servoInit();
     servoControllerInit();
@@ -325,10 +605,31 @@ void loop()
 {
     canPollCommands();
 
-    applyHighState(g_targetHighState);
+    applyHighBeamIndicators(g_targetHighBeamState);
+    applyHighBeamOutput(g_targetHighBeamState);
 
     uint32_t nowMs = millis();
+
+    /* 1초마다 수신 상태 요약 출력 */
+    static uint32_t lastStatMs = 0;
+    if ((nowMs - lastStatMs) >= 1000) {
+        lastStatMs = nowMs;
+        Serial.printf("[RX-STAT] total=%lu servo=%lu high_beam=%lu turn=%lu other=%lu\n",
+            (unsigned long)g_rxCountTotal,
+            (unsigned long)g_rxCountServo,
+            (unsigned long)g_rxCountHighBeam,
+            (unsigned long)g_rxCountTurn,
+            (unsigned long)g_rxCountOther);
+
+        g_rxCountTotal = 0;
+        g_rxCountServo = 0;
+        g_rxCountHighBeam = 0;
+        g_rxCountTurn = 0;
+        g_rxCountOther = 0;
+    }
+
     servoUpdate(nowMs);
+    signalsUpdate(nowMs);
 
     delay(5);
 }
