@@ -3,15 +3,15 @@
 #include "driver/twai.h"
 #include "DHT.h"
 
-/* ===== CAN Åë½Å ÇÉ ¼³Á¤ ===== */
+/* ===== CAN í†µì‹  í•€ ì„¤ì • ===== */
 #define CAN_RX_GPIO_PIN GPIO_NUM_32
 #define CAN_TX_GPIO_PIN GPIO_NUM_33
 
-/* ===== DHT11 ¼³Á¤ ===== */
+/* ===== DHT11 ì„¤ì • ===== */
 #define DHTPIN 17
 #define DHTTYPE DHT11
 
-/* ===== CDS(Á¶µµ, ADC) ¼³Á¤ ===== */
+/* ===== CDS(ì¡°ë„, ADC) ì„¤ì • ===== */
 #define CDS_GPIO_PIN 34
 
 /* ===== CAN ID ===== */
@@ -20,7 +20,7 @@
 
 static DHT g_dht(DHTPIN, DHTTYPE);
 
-/* ===== CAN ±âº» È¯°æ ¼³Á¤ ===== */
+/* ===== CAN ê¸°ë³¸ í™˜ê²½ ì„¤ì • ===== */
 static bool can_driver_init()
 {
     twai_general_config_t generalConfig =
@@ -124,9 +124,9 @@ void setup()
 
     g_dht.begin();
 
-    /* ESP32(ÀÏ¹İ ¸ğµ¨) ±âÁØÀ¸·Î GPIO17Àº ADC ÇÉÀÌ ¾Æ´Ô.
-       ½ÇÁ¦ ADC ÀÔ·ÂÀÌ ÇÊ¿äÇÏ¸é 32~39(ADC1) ¶Ç´Â 25~27(ADC2)·Î ¿Å°Ü¾ß ÇÔ.
-       »ç¿ëÀÚ ¿ä±¸»çÇ×¿¡ µû¶ó GPIO17·Î À¯ÁöÇÔ. */
+    /* ESP32(ì¼ë°˜ ëª¨ë¸) ê¸°ì¤€ìœ¼ë¡œ GPIO17ì€ ADC í•€ì´ ì•„ë‹˜.
+       ì‹¤ì œ ADC ì…ë ¥ì´ í•„ìš”í•˜ë©´ 32~39(ADC1) ë˜ëŠ” 25~27(ADC2)ë¡œ ì˜®ê²¨ì•¼ í•¨.
+       ì‚¬ìš©ì ìš”êµ¬ì‚¬í•­ì— ë”°ë¼ GPIO17ë¡œ ìœ ì§€í•¨. */
     analogReadResolution(12);
 
     Serial.println("TX ready");
@@ -150,7 +150,7 @@ void loop()
         Serial.println("Failed to read from DHT sensor!");
     }
 
-    /* ===== CDS(Á¶µµ, ADC raw) ===== */
+    /* ===== CDS(ì¡°ë„, ADC raw) ===== */
     uint16_t cdsAdc12 = (uint16_t)analogRead((int)CDS_GPIO_PIN);
 
     bool sentCds = can_send_cds_raw(cdsAdc12);

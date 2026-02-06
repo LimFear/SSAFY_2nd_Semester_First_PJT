@@ -19,6 +19,12 @@ static const uint16_t MQTT_PORT = 1883;
 static const char* TOPIC_BASE = "Lim/haha5123/esp32";
 
 /* =========================
+ * 옵션
+ * ========================= */
+#define ENABLE_MQTT_COMMANDS 0  /* 1: MQTT 토픽으로 ON/OFF/AUTO 제어 허용, 0: 웹(UI)만 사용 */
+
+
+/* =========================
  * CAN 핀/ID
  * ========================= */
 #define CAN_RX_GPIO_PIN GPIO_NUM_32
@@ -28,7 +34,9 @@ static const char* TOPIC_BASE = "Lim/haha5123/esp32";
 #define CAN_CDS_ID              0x110
 
 #define CAN_ID_CMD_SERVO        0x200
-#define SERVO_CMD_SET_ANGLE     0x01
+#define SERVO_CMD_SET_SPEED_LEVEL   0x01
+/* 호환용(기존 명칭) */
+#define SERVO_CMD_SET_ANGLE           SERVO_CMD_SET_SPEED_LEVEL
 
 #define CAN_ID_CMD_HIGH_BEAM    0x210
 #define HIGH_BEAM_CMD_SET_STATE 0x11
@@ -42,7 +50,7 @@ static const char* TOPIC_BASE = "Lim/haha5123/esp32";
 
 
  /* =========================
-  * 모드 상수
+  * 모드 상수 (정환님 기존 유지)
   * ========================= */
 static const uint8_t MODE_AUTO = 0;
 static const uint8_t MODE_ON = 1;
@@ -73,6 +81,11 @@ static const float kWiperHumThFast = 40.0f;
 
 /* 수동 ON일 때 고정 speed */
 static const uint8_t kManualWiperOnSpeed = kSpeedLevelNormal;
+
+/* 센서가 일정 시간 갱신되지 않으면 AUTO에서 안전상 OFF로 처리 */
+static const uint32_t kSensorStaleMs = 6000;  // DHT/온습도
+static const uint32_t kCdsStaleMs    = 6000;  // 조도
+
 
 /* =========================
  * AUTO CDS(조도, ADC raw) threshold
@@ -141,9 +154,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       --shadow:0 0 0 2px var(--neon-dim), 0 0 18px rgba(102,243,220,.10);
       --shadow-strong:0 0 0 2px rgba(102,243,220,.95), 0 0 26px rgba(102,243,220,.28);
       --radius:14px;
-      --padTopH: clamp(66px, 12vh, 120px);
-      --padBtnH:  clamp(70px, 13vh, 132px);
-      --gap: clamp(8px, 1.2vh, 14px);
+      --gap: clamp(10px, 1.6vh, 16px);
+      --red:#ff3b30;
     }
 
     *{ box-sizing:border-box; }
@@ -170,19 +182,37 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       .portraitLock{ display:flex; }
     }
 
+    /* ===== 전체 레이아웃: 좌(2/3) / 우(1/3) ===== */
     .app{
       height:100vh;
       width:100vw;
-      padding: clamp(8px, 1.4vh, 14px) clamp(10px, 1.8vw, 18px);
+      padding: clamp(10px, 1.6vh, 16px) clamp(12px, 2vw, 18px);
       display:grid;
-      grid-template-rows: 30vh 22vh 48vh;
+      grid-template-columns: 2fr 1fr;
       gap: var(--gap);
     }
 
-    .topRow{
+    .leftPanel{
       display:grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: clamp(8px, 1.2vw, 14px);
+      grid-template-rows: 1fr auto;
+      gap: var(--gap);
+      min-height:0;
+    }
+
+    /* 상단 3개: Wiper / Emergency / High Beam */
+    .mainControls{
+      display:grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: clamp(10px, 1.6vw, 18px);
+      align-items:stretch;
+      min-height:0;
+    }
+
+    /* 하단 2개: Left / Right */
+    .turnControls{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: clamp(12px, 2vw, 20px);
       align-items:stretch;
       min-height:0;
     }
@@ -190,10 +220,9 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     .controlGroup{
       display:grid;
       grid-template-rows: 1fr auto;
-      gap: clamp(6px, 0.9vh, 10px);
+      gap: clamp(8px, 1.2vh, 12px);
       min-height:0;
     }
-
     .controlGroup.simple{
       grid-template-rows: 1fr;
     }
@@ -206,7 +235,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       box-shadow:var(--shadow);
       display:grid;
       place-items:center;
-      padding: clamp(8px, 1vh, 10px);
+      padding: clamp(10px, 1.4vh, 14px);
       user-select:none;
       -webkit-tap-highlight-color:transparent;
       min-height:0;
@@ -237,243 +266,276 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       grid-template-rows: 1fr auto;
       align-items:center;
       justify-items:center;
-      gap: clamp(6px, .8vh, 10px);
+      gap: clamp(8px, 1.2vh, 14px);
     }
 
     .iconLabel{
-      font-size: clamp(12px, 1.6vh, 18px);
+      font-size: clamp(14px, 2.2vh, 22px);
       color: rgba(255,255,255,.65);
       letter-spacing:.3px;
       padding-bottom:2px;
     }
 
     .svgIcon{
-      width: clamp(56px, 6.2vw, 108px);
+      width: clamp(64px, 7.5vw, 130px);
       height:auto;
-      max-height:70%;
+      max-height:72%;
       opacity:.95;
       filter: drop-shadow(0 0 8px rgba(102,243,220,.18));
     }
     .strokeNeon{ stroke:var(--neon); }
     .fillNeon{ fill:var(--neon); }
+    .strokeRed{ stroke:var(--red); }
+    .fillRed{ fill:var(--red); }
 
     .switchStack{
       display:grid;
       grid-template-rows: auto auto;
-      gap: clamp(6px, 0.8vh, 10px);
+      gap: clamp(8px, 1.2vh, 12px);
     }
-
     .segSwitch{
       width:100%;
       display:grid;
       grid-template-columns: 1fr 1fr;
-      gap: clamp(6px, .8vw, 12px);
+      gap: clamp(8px, 1.2vw, 14px);
     }
-
-    .segBtn{
-      height: clamp(30px, 5vh, 42px);
-      border-radius: 11px;
+    .segBtn, .autoBtn{
+      border-radius: 12px;
       border: 2px solid var(--neon-dim);
       background: transparent;
       color: rgba(255,255,255,.70);
-      font-size: clamp(13px, 1.7vh, 18px);
       user-select:none;
       -webkit-tap-highlight-color:transparent;
       touch-action: manipulation;
     }
-    .segBtn.active{
-      border-color: rgba(102,243,220,.95);
-      box-shadow: var(--shadow-strong);
-      background: rgba(102,243,220,.10);
-      color: rgba(255,255,255,.92);
+    .segBtn{
+      height: clamp(36px, 5.8vh, 52px);
+      font-size: clamp(14px, 2.1vh, 20px);
     }
-    .segBtn:active{ transform: translateY(1px); }
-
     .autoBtn{
-      height: clamp(28px, 4.6vh, 40px);
-      border-radius: 11px;
-      border: 2px solid var(--neon-dim);
-      background: transparent;
-      color: rgba(255,255,255,.68);
-      font-size: clamp(12px, 1.6vh, 17px);
+      height: clamp(34px, 5.5vh, 48px);
+      font-size: clamp(13px, 2.0vh, 19px);
       letter-spacing: .6px;
-      user-select:none;
-      -webkit-tap-highlight-color:transparent;
-      touch-action: manipulation;
     }
-    .autoBtn.active{
+    .segBtn.active, .autoBtn.active{
       border-color: rgba(102,243,220,.95);
       box-shadow: var(--shadow-strong);
       background: rgba(102,243,220,.10);
       color: rgba(255,255,255,.92);
     }
-    .autoBtn:active{ transform: translateY(1px); }
+    .segBtn:active, .autoBtn:active{ transform: translateY(1px); }
 
-    .midRow{
+    /* ===== 우측 패널 ===== */
+    .rightPanel{
+      border-left: 2px solid rgba(102,243,220,.28);
+      padding-left: var(--gap);
       display:grid;
-      grid-template-columns: 1fr;
-      align-items: start;
+      grid-template-rows: auto auto 1fr;
+      gap: var(--gap);
       min-height:0;
     }
-    .infoBlock{
-      display:grid;
-      grid-template-columns: auto 1fr;
-      gap: clamp(12px, 1.6vw, 18px);
-      align-items: start;
-      min-height:0;
+
+    .clockBox{
+      border-radius: var(--radius);
+      background: rgba(0,0,0,.10);
+      box-shadow: var(--shadow);
+      padding: clamp(12px, 1.6vh, 16px);
+    }
+    .dateLine{
+      font-size: clamp(14px, 2.0vh, 20px);
+      color: rgba(255,255,255,.72);
+      letter-spacing:.3px;
+    }
+    .timeLine{
+      margin-top: 6px;
+      font-size: clamp(20px, 3.2vh, 32px);
+      font-weight: 750;
+      color: rgba(255,255,255,.92);
+      letter-spacing:.6px;
+      text-shadow: 0 0 14px rgba(102,243,220,.12);
     }
 
     .readouts{
-      font-size: clamp(14px, 2.2vh, 24px);
-      line-height: 1.45;
-      color: var(--text-dim);
-      letter-spacing: .2px;
-      padding-top: 2px;
+      border-radius: var(--radius);
+      background: rgba(0,0,0,.10);
+      box-shadow: var(--shadow);
+      padding: clamp(12px, 1.6vh, 16px);
+      font-size: clamp(14px, 2.2vh, 22px);
+      line-height: 1.55;
+      color: rgba(255,255,255,.70);
     }
     .readouts b{
-      color: rgba(255,255,255,.82);
-      font-weight: 650;
+      color: rgba(255,255,255,.92);
+      font-weight: 750;
     }
 
-    .resetBtn{
-      width: clamp(130px, 18vw, 180px);
-      height: clamp(86px, 15vh, 140px);
+    .carBox{
       border-radius: var(--radius);
-      border: 2px solid var(--neon-dim);
-      background: transparent;
+      background: rgba(0,0,0,.10);
       box-shadow: var(--shadow);
-      color: rgba(255,255,255,.70);
-      font-size: clamp(14px, 1.8vh, 20px);
-      line-height: 1.2;
-      user-select:none;
-      -webkit-tap-highlight-color:transparent;
-      touch-action: manipulation;
-    }
-    .resetBtn:active{ box-shadow: var(--shadow-strong); transform: translateY(1px); }
-
-    .bottomRow{
+      padding: clamp(10px, 1.4vh, 14px);
       display:grid;
-      grid-template-columns: 1fr clamp(170px, 22vw, 260px);
-      gap: clamp(12px, 2vw, 22px);
-      align-items: center;
+      place-items:center;
       min-height:0;
     }
 
-    .pad{
-      width: min(640px, 100%);
-      display:grid;
-      grid-template-rows: auto auto;
-      gap: clamp(10px, 1.4vh, 14px);
-      justify-items: center;
-      align-items: start;
-      min-height:0;
-      padding-top: 2px;
-    }
-
-    .padTop{
-      width: clamp(170px, 22vw, 220px);
-    }
-
-    .padBottom{
+    .carSvg{
       width: 100%;
-      display:grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: clamp(10px, 1.4vw, 14px);
+      max-width: 360px;
+      height: auto;
     }
 
-    .padBtn{
-      border-radius: var(--radius);
-      border: 2px solid var(--neon-dim);
-      background: transparent;
-      box-shadow: var(--shadow);
-      display:grid;
-      place-items:center;
-      user-select:none;
-      -webkit-tap-highlight-color:transparent;
-      touch-action: none;
-      position: relative;
-    }
-    .padBtn.top{ height: var(--padTopH); }
-    .padBtn.side{ height: var(--padBtnH); }
-
-    .padBtn .corner{
-      position:absolute;
-      width: clamp(14px, 2vw, 24px);
-      height: clamp(14px, 2vw, 24px);
-      border-color: rgba(102,243,220,.45);
-      border-style: solid;
-    }
-    .padBtn .c1{ top: 10px; left: 10px; border-width: 3px 0 0 3px; }
-    .padBtn .c2{ top: 10px; right: 10px; border-width: 3px 3px 0 0; }
-    .padBtn .c3{ bottom: 10px; left: 10px; border-width: 0 0 3px 3px; }
-    .padBtn .c4{ bottom: 10px; right: 10px; border-width: 0 3px 3px 0; }
-
-    .padBtn svg{
-      width: 58%;
-      height: 58%;
-      opacity: .92;
-      filter: drop-shadow(0 0 10px rgba(102,243,220,.18));
+    /* ===== 차량 파트 점멸 ===== */
+    @keyframes blink {
+      0%   { opacity: 0.20; }
+      50%  { opacity: 1.00; }
+      100% { opacity: 0.20; }
     }
 
-    .padBtn.pressed{
-      box-shadow: var(--shadow-strong);
-      border-color: rgba(102,243,220,.95);
-      background: rgba(102,243,220,.08);
+    .carStroke{
+      stroke: var(--neon);
+      fill: none;
+      stroke-width: 3.5;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+      filter: drop-shadow(0 0 10px rgba(102,243,220,.10));
+      opacity: .95;
+    }
+    .carFillDim{
+      fill: rgba(102,243,220,.10);
+      stroke: rgba(102,243,220,.35);
+      stroke-width: 2;
+      filter: drop-shadow(0 0 10px rgba(102,243,220,.08));
     }
 
-    .stopBtn{
-      width: 100%;
-      aspect-ratio: 1 / 1;
-      border-radius: var(--radius);
-      border: 2px solid var(--neon-dim);
-      background: transparent;
-      box-shadow: var(--shadow);
-      position: relative;
-      user-select:none;
-      -webkit-tap-highlight-color:transparent;
-      touch-action: manipulation;
-      overflow: hidden;
+    .carPart{
+      stroke: rgba(102,243,220,.70);
+      fill: none;
+      stroke-width: 4;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+      opacity: .95;
+      filter: drop-shadow(0 0 12px rgba(102,243,220,.10));
     }
-    .stopRing{
-      position:absolute;
-      width:72%;
-      height:72%;
-      border: clamp(3px, .6vw, 6px) solid rgba(102,243,220,.55);
-      border-radius: 50%;
-      left: 14%;
-      top: 14%;
-      transform: rotate(18deg);
-      box-shadow: 0 0 16px rgba(102,243,220,.12);
+
+    .carPart.blink{
+      stroke: var(--red);
+      filter: drop-shadow(0 0 14px rgba(255,59,48,.22));
+      animation: blink .65s infinite;
     }
-    .stopStamp{
-      position:absolute;
-      inset:0;
-      display:grid;
-      place-items:center;
-      transform: rotate(-18deg);
-      color: rgba(102,243,220,.88);
-      font-weight: 800;
-      font-size: clamp(28px, 4.6vw, 54px);
-      letter-spacing: 2px;
-      text-shadow: 0 0 14px rgba(102,243,220,.20);
+    .carLamp{
+      fill: rgba(102,243,220,.35);
+      stroke: rgba(102,243,220,.70);
+      stroke-width: 3;
+      opacity: .95;
+      filter: drop-shadow(0 0 14px rgba(102,243,220,.10));
     }
-    .stopBtn:active{ box-shadow: var(--shadow-strong); transform: translateY(1px); }
+    .carLamp.blink{
+      fill: rgba(255,59,48,.85);
+      stroke: var(--red);
+      filter: drop-shadow(0 0 14px rgba(255,59,48,.24));
+      animation: blink .65s infinite;
+    }
   </style>
 </head>
 
 <body>
   <div class="portraitLock">
     <div>
-      <div style="font-size:22px; margin-bottom:10px; color: rgba(255,255,255,.85);">���� ��忡�� ����Ͻʽÿ�.</div>
-      <div style="font-size:14px; color: rgba(255,255,255,.55);">�º����� ���η� ������ ��Ʈ�� �г��� ǥ�õ˴ϴ�.</div>
+      <div style="font-size:22px; margin-bottom:10px; color: rgba(255,255,255,.85);">가로 모드에서 사용하십시오.</div>
+      <div style="font-size:14px; color: rgba(255,255,255,.55);">태블릿을 가로로 눕히면 컨트롤 패널이 표시됩니다.</div>
     </div>
   </div>
 
   <div class="app">
 
-    <div class="topRow">
+    <!-- ===== 좌측(2/3): 버튼 ===== -->
+    <div class="leftPanel">
 
-      <div class="controlGroup simple" data-group="left">
+      <div class="mainControls">
+
+        <!-- WIPER -->
+        <div class="controlGroup" data-group="wiper">
+          <div class="iconCard">
+            <div class="iconInner">
+              <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linejoin="round"
+                      d="M12 16 Q14 10 20 10 H44 Q50 10 52 16 L56 34
+                         Q57 40 53 44 Q49 48 42 46 Q32 44 22 46
+                         Q15 48 11 44 Q7 40 8 34 L12 16Z"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linejoin="round"
+                      d="M14 18 L22 14 L17 28 Z" opacity="0.55"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
+                      d="M28 22 V52"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
+                      d="M36 22 V52"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
+                      d="M28 34 L24 32"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
+                      d="M36 34 L40 32"/>
+                <circle class="fillNeon" cx="28" cy="54" r="3.6"/>
+                <circle class="fillNeon" cx="36" cy="54" r="3.6"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
+                      d="M40 20 C46 20 50 23 54 27"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
+                      d="M40 28 C45 28 48 30 51 33"/>
+              </svg>
+              <div class="iconLabel">Wiper</div>
+            </div>
+          </div>
+
+          <div class="switchStack">
+            <div class="segSwitch">
+              <button class="segBtn active" data-seg="on" type="button">On</button>
+              <button class="segBtn" data-seg="off" type="button">Off</button>
+            </div>
+            <button class="autoBtn" data-seg="auto" type="button">AUTO</button>
+          </div>
+        </div>
+
+        <!-- EMERGENCY -->
+        <div class="controlGroup simple" data-group="emer">
+          <button class="iconCard iconCardBtn" type="button" data-box="emer" aria-label="Emergency">
+            <div class="iconInner">
+              <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
+                <path class="strokeRed" fill="none" stroke-width="5" stroke-linejoin="round"
+                      d="M32 10 L56 52 H8 L32 10 Z"/>
+                <path class="strokeRed" fill="none" stroke-width="5" stroke-linejoin="round" opacity="0.85"
+                      d="M32 20 L46 46 H18 L32 20 Z"/>
+              </svg>
+              <div class="iconLabel">Emergency</div>
+            </div>
+          </button>
+        </div>
+
+        <!-- HIGH BEAM -->
+        <div class="controlGroup" data-group="high_beam">
+          <div class="iconCard">
+            <div class="iconInner">
+              <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round" d="M10 24 H26"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round" d="M10 32 H26"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round" d="M10 40 H26"/>
+                <path class="strokeNeon" fill="none" stroke-width="4" stroke-linejoin="round"
+                      d="M28 18 H42 Q54 18 54 32 Q54 46 42 46 H28 Z"/>
+              </svg>
+              <div class="iconLabel">High Beam</div>
+            </div>
+          </div>
+
+          <div class="switchStack">
+            <div class="segSwitch">
+              <button class="segBtn active" data-seg="on" type="button">On</button>
+              <button class="segBtn" data-seg="off" type="button">Off</button>
+            </div>
+            <button class="autoBtn" data-seg="auto" type="button">AUTO</button>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="turnControls">
+        <!-- LEFT -->
         <button class="iconCard iconCardBtn" type="button" data-box="left" aria-label="Left">
           <div class="iconInner">
             <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
@@ -482,68 +544,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
             <div class="iconLabel">Left</div>
           </div>
         </button>
-      </div>
 
-      <div class="controlGroup" data-group="wiper">
-        <div class="iconCard">
-          <div class="iconInner">
-            <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
-              <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
-                d="M10 28c10-10 34-10 44 0M18 36c8-7 20-7 28 0"/>
-              <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round" d="M32 18v28"/>
-              <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round" d="M27 40l10-8"/>
-            </svg>
-            <div class="iconLabel">Wiper</div>
-          </div>
-        </div>
-
-        <div class="switchStack">
-          <div class="segSwitch">
-            <button class="segBtn active" data-seg="on" type="button">On</button>
-            <button class="segBtn" data-seg="off" type="button">Off</button>
-          </div>
-          <button class="autoBtn" data-seg="auto" type="button">AUTO</button>
-        </div>
-      </div>
-
-      <div class="controlGroup simple" data-group="emer">
-        <button class="iconCard iconCardBtn" type="button" data-box="emer" aria-label="Emergency">
-          <div class="iconInner">
-            <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
-              <path class="fillNeon" d="M22 30c0-6 4-10 10-10s10 4 10 10v4H22v-4z"/>
-              <path class="fillNeon" d="M18 38h28l4 12H14l4-12z"/>
-              <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round" d="M32 10v6"/>
-            </svg>
-            <div class="iconLabel">Emergency</div>
-          </div>
-        </button>
-      </div>
-
-      <div class="controlGroup" data-group="high_beam">
-        <div class="iconCard">
-          <div class="iconInner">
-            <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
-              <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
-                d="M18 36c6-10 22-10 28 0"/>
-              <path class="strokeNeon" fill="none" stroke-width="4" stroke-linecap="round"
-                d="M20 28h-6M22 24h-8M22 32h-8"/>
-              <text x="36" y="40" fill="rgba(102,243,220,.85)" font-size="10" font-weight="700">AUTO</text>
-              <text x="38" y="52" fill="rgba(102,243,220,.85)" font-size="12" font-weight="800">High Beam</text>
-            </svg>
-            <div class="iconLabel">High Beam</div>
-          </div>
-        </div>
-
-        <div class="switchStack">
-          <div class="segSwitch">
-            <button class="segBtn active" data-seg="on" type="button">On</button>
-            <button class="segBtn" data-seg="off" type="button">Off</button>
-          </div>
-          <button class="autoBtn" data-seg="auto" type="button">AUTO</button>
-        </div>
-      </div>
-
-      <div class="controlGroup simple" data-group="right">
+        <!-- RIGHT -->
         <button class="iconCard iconCardBtn" type="button" data-box="right" aria-label="Right">
           <div class="iconInner">
             <svg class="svgIcon" viewBox="0 0 64 64" aria-hidden="true">
@@ -556,82 +558,111 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     </div>
 
-    <div class="midRow">
-      <div class="infoBlock">
-        <button class="resetBtn" type="button">Reset<br/>Rotation</button>
+    <!-- ===== 우측(1/3): 날짜/시간 + 센서 + 차량 ===== -->
+    <div class="rightPanel">
 
-        <div class="readouts">
-          <div>Temperature: <b id="tempText">--C</b></div>
-          <div>Humidity: <b id="humText">--%</b></div>
-          <div>CDS(ADC): <b id="cdsText">--</b></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="bottomRow">
-
-      <div class="pad" aria-label="Arrow Pad">
-        <div class="padTop">
-          <div class="padBtn top" data-pad="up" role="button" aria-label="Up">
-            <div class="corner c1"></div><div class="corner c2"></div><div class="corner c3"></div><div class="corner c4"></div>
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M32 14 20 26m12-12 12 12"/>
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M32 26 20 38m12-12 12 12"/>
-            </svg>
-          </div>
-        </div>
-
-        <div class="padBottom">
-          <div class="padBtn side" data-pad="left" role="button" aria-label="Left">
-            <div class="corner c1"></div><div class="corner c2"></div><div class="corner c3"></div><div class="corner c4"></div>
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M14 32 26 20m-12 12 12 12"/>
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M26 32 38 20m-12 12 12 12"/>
-            </svg>
-          </div>
-
-          <div class="padBtn side" data-pad="down" role="button" aria-label="Down">
-            <div class="corner c1"></div><div class="corner c2"></div><div class="corner c3"></div><div class="corner c4"></div>
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M32 50 20 38m12 12 12-12"/>
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M32 38 20 26m12 12 12-12"/>
-            </svg>
-          </div>
-
-          <div class="padBtn side" data-pad="right" role="button" aria-label="Right">
-            <div class="corner c1"></div><div class="corner c2"></div><div class="corner c3"></div><div class="corner c4"></div>
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M50 32 38 20m12 12-12 12"/>
-              <path class="strokeNeon" fill="none" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"
-                d="M38 32 26 20m12 12-12 12"/>
-            </svg>
-          </div>
-        </div>
+      <div class="clockBox" aria-label="Date and Time">
+        <div class="dateLine" id="dateText">----</div>
+        <div class="timeLine" id="timeText">--:--:--</div>
       </div>
 
-      <button class="stopBtn" type="button" aria-label="STOP">
-        <div class="stopRing" aria-hidden="true"></div>
-        <div class="stopStamp">STOP</div>
-      </button>
+      <div class="readouts" aria-label="Sensor Readouts">
+        <div>온도 : <b id="tempText">--°C</b></div>
+        <div>습도 : <b id="humText">--%</b></div>
+        <div>현재 밝기 : <b id="cdsText">--</b></div>
+      </div>
 
+      <div class="carBox" aria-label="Car Status">
+        <!-- 위에서 바라본 차량(앞쪽이 위) -->
+        <svg class="carSvg" viewBox="0 0 240 420" aria-hidden="true">
+          <!-- Car body -->
+          <path class="carStroke"
+                d="M70 40
+                   Q120 10 170 40
+                   Q186 52 190 80
+                   L200 170
+                   Q205 200 205 220
+                   L205 300
+                   Q205 332 188 352
+                   Q170 372 140 374
+                   L100 374
+                   Q70 372 52 352
+                   Q35 332 35 300
+                   L35 220
+                   Q35 200 40 170
+                   L50 80
+                   Q54 52 70 40 Z"/>
+
+          <!-- cabin / glass outline -->
+          <path id="windshield" class="carPart"
+                d="M78 90
+                   Q120 66 162 90
+                   L175 170
+                   Q178 190 165 205
+                   Q150 222 120 218
+                   Q90 222 75 205
+                   Q62 190 65 170
+                   L78 90 Z"/>
+
+          <!-- roof/cabin fill -->
+          <path class="carFillDim"
+                d="M88 108
+                   Q120 88 152 108
+                   L162 164
+                   Q165 178 156 188
+                   Q142 204 120 200
+                   Q98 204 84 188
+                   Q75 178 78 164
+                   L88 108 Z"/>
+
+          <!-- headlamps (front is top) -->
+          <path id="headL" class="carLamp"
+                d="M62 70 Q72 56 92 58 Q92 74 76 82 Q60 88 52 86 Q54 78 62 70 Z"/>
+          <path id="headR" class="carLamp"
+                d="M178 70 Q168 56 148 58 Q148 74 164 82 Q180 88 188 86 Q186 78 178 70 Z"/>
+
+          <!-- turn signals (front) -->
+          <circle id="turnL" class="carLamp" cx="52" cy="108" r="10"/>
+          <circle id="turnR" class="carLamp" cx="188" cy="108" r="10"/>
+
+          <!-- rear lights (dim only) -->
+          <rect class="carLamp" x="54" y="332" width="34" height="16" rx="8" opacity="0.45"/>
+          <rect class="carLamp" x="152" y="332" width="34" height="16" rx="8" opacity="0.45"/>
+
+          <!-- center line -->
+          <path class="carStroke" opacity="0.35"
+                d="M120 70 L120 350"/>
+        </svg>
+      </div>
     </div>
-
   </div>
 
 <script>
   // ===== 공용 유틸 =====
   function setActive(element, on) {
+    if (!element) return;
     element.classList.toggle('active', Boolean(on));
   }
 
-  // ===== [추가] ESP32로 명령 보내기 =====
+  function toLowerSafe(v){
+    if (typeof v !== 'string') return '';
+    return v.toLowerCase();
+  }
+
+  // ===== 시간 표시(로컬) =====
+  function tickClock(){
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('ko-KR', { year:'numeric', month:'2-digit', day:'2-digit', weekday:'short' });
+    const timeStr = now.toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    const dateEl = document.getElementById('dateText');
+    const timeEl = document.getElementById('timeText');
+    if (dateEl) dateEl.textContent = dateStr;
+    if (timeEl) timeEl.textContent = timeStr;
+  }
+  tickClock();
+  setInterval(tickClock, 1000);
+
+  // ===== ESP32로 명령 보내기 =====
   async function sendMode(target, state) {
     // state: 'auto' | 'on' | 'off'
     let mode = 'AUTO';
@@ -640,12 +671,38 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     try {
       await fetch('/api/set?target=' + encodeURIComponent(target) + '&mode=' + encodeURIComponent(mode));
-    } catch (e) {
-      // 네트워크 끊겨도 UI가 멈추지 않게 무시
-    }
+    } catch (e) {}
   }
 
-  // ===== [추가] 서버 상태 동기화 =====
+  async function sendTurn(mode) {
+    // mode: 'OFF' | 'LEFT' | 'RIGHT' | 'HAZARD'
+    try {
+      await fetch('/api/turn?mode=' + encodeURIComponent(mode));
+    } catch (e) {}
+  }
+
+  // ===== 차량 점멸 제어 =====
+  function setBlinkById(id, on){
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('blink', Boolean(on));
+  }
+
+  function updateCarBlink(state){
+    // state: { turn:'off'|'left'|'right'|'hazard', wiperActive:boolean, highActive:boolean }
+    const turn = state.turn || 'off';
+    const isLeft = (turn === 'left' || turn === 'hazard');
+    const isRight = (turn === 'right' || turn === 'hazard');
+
+    setBlinkById('turnL', isLeft);
+    setBlinkById('turnR', isRight);
+
+    setBlinkById('windshield', Boolean(state.wiperActive));
+    setBlinkById('headL', Boolean(state.highActive));
+    setBlinkById('headR', Boolean(state.highActive));
+  }
+
+  // ===== UI 그룹 상태 반영(세그/오토) =====
   function setGroupUI(groupEl, state) {
     const segmentButtons = groupEl.querySelectorAll('.segBtn');
     const autoButton = groupEl.querySelector('.autoBtn');
@@ -666,117 +723,10 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     });
   }
 
-  async function refreshFromServer(){
-    try{
-      const r = await fetch('/api/state');
-      const j = await r.json();
-
-      // wiper/high_beam 상태 반영
-      const wiperGroup = document.querySelector('.controlGroup[data-group="wiper"]');
-      const highGroup  = document.querySelector('.controlGroup[data-group="high_beam"]');
-
-      if (wiperGroup) {
-        const state = (j.wiper || 'AUTO').toLowerCase(); // 'auto'/'on'/'off'
-        setGroupUI(wiperGroup, state);
-      }
-
-      if (highGroup) {
-        const state = ((j.high_beam || j.high || 'AUTO')).toLowerCase();
-        setGroupUI(highGroup, state);
-      }
-
-      // turn 상태 반영 (OFF/LEFT/RIGHT/HAZARD)
-      if (typeof j.turn === 'string') {
-        const t = (j.turn || 'OFF').toLowerCase();
-
-        if (t === 'hazard') {
-          setHazard(true);
-        } else {
-          setHazard(false);
-
-          if (t === 'left') {
-            setTurnSignal('left');
-          } else if (t === 'right') {
-            setTurnSignal('right');
-          } else {
-            setTurnSignal('off');
-          }
-        }
-      }
-
-      // (선택) 온습도 표시: 지금은 서버가 값 안 주면 -- 유지
-      if (typeof j.temp === 'number') {
-        document.getElementById('tempText').textContent = j.temp.toFixed(1) + '��C';
-      }
-      if (typeof j.hum === 'number') {
-        document.getElementById('humText').textContent = j.hum.toFixed(1) + '%';
-      }
-      if (typeof j.cds === 'number') {
-        document.getElementById('cdsText').textContent = String(j.cds);
-      }
-    } catch(e) {
-      // 무시
-    }
-  }
-
-  // ===== 1) AUTO 기본값 + [추가] 클릭 시 ESP32로 전송 =====
-  document.querySelectorAll('.controlGroup').forEach(group => {
-    const groupName = group.dataset.group || '';
-    const segmentButtons = group.querySelectorAll('.segBtn');
-    const autoButton = group.querySelector('.autoBtn');
-
-    if (!autoButton) {
-      return;
-    }
-
-    function clearAll() {
-      segmentButtons.forEach(button => button.classList.remove('active'));
-      autoButton.classList.remove('active');
-    }
-
-    function setState(state) {
-      clearAll();
-
-      if (state === 'auto') {
-        autoButton.classList.add('active');
-      } else {
-        segmentButtons.forEach(button => {
-          if (button.dataset.seg === state) {
-            button.classList.add('active');
-          }
-        });
-      }
-
-      // [추가] wiper/high면 서버로 명령 전송
-      if (groupName === 'wiper' || groupName === 'high_beam') {
-        sendMode(groupName, state);
-      }
-    }
-
-    segmentButtons.forEach(button => {
-      button.addEventListener('click', () => setState(button.dataset.seg));
-    });
-
-    autoButton.addEventListener('click', () => setState('auto'));
-
-    setState('auto');
-  });
-
   // ===== 버튼 참조 =====
   const leftButton  = document.querySelector('[data-box="left"]');
   const rightButton = document.querySelector('[data-box="right"]');
   const emerButton  = document.querySelector('[data-box="emer"]');
-
-
-  // ===== [추가] ESP32로 방향지시등/비상등 명령 보내기 =====
-  async function sendTurn(mode) {
-    // mode: 'OFF' | 'LEFT' | 'RIGHT' | 'HAZARD'
-    try {
-      await fetch('/api/turn?mode=' + encodeURIComponent(mode));
-    } catch (e) {
-      // 무시
-    }
-  }
 
   function isHazardOn() {
     if (!emerButton) return false;
@@ -803,13 +753,90 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   }
 
   function setHazard(on) {
-    if (!emerButton) return;
-
     setActive(emerButton, on);
-    if (leftButton)  setActive(leftButton, on);
-    if (rightButton) setActive(rightButton, on);
+    setActive(leftButton, on);
+    setActive(rightButton, on);
   }
 
+  // ===== 로컬 UI 기준 차량 즉시 반영(서버 응답 오기 전) =====
+  function updateCarFromUI(){
+    const isHaz = isHazardOn();
+    const lOn = leftButton ? leftButton.classList.contains('active') : false;
+    const rOn = rightButton ? rightButton.classList.contains('active') : false;
+
+    let turn = 'off';
+    if (isHaz) {
+      turn = 'hazard';
+    } else if (lOn) {
+      turn = 'left';
+    } else if (rOn) {
+      turn = 'right';
+    }
+
+    const wiperGroup = document.querySelector('.controlGroup[data-group="wiper"]');
+    const highGroup  = document.querySelector('.controlGroup[data-group="high_beam"]');
+
+    // "실제 동작" 판단은 서버가 active 플래그를 주면 그걸 써야 정확함.
+    // 일단 UI가 ON이면 점멸하도록 처리.
+    let wiperActive = false;
+    if (wiperGroup) {
+      const onBtn = wiperGroup.querySelector('.segBtn[data-seg="on"]');
+      if (onBtn) wiperActive = onBtn.classList.contains('active');
+    }
+
+    let highActive = false;
+    if (highGroup) {
+      const onBtn = highGroup.querySelector('.segBtn[data-seg="on"]');
+      if (onBtn) highActive = onBtn.classList.contains('active');
+    }
+
+    updateCarBlink({ turn, wiperActive, highActive });
+  }
+
+  // ===== 세그 버튼 동작 + 서버 전송 =====
+  document.querySelectorAll('.controlGroup').forEach(group => {
+    const groupName = group.dataset.group || '';
+    const segmentButtons = group.querySelectorAll('.segBtn');
+    const autoButton = group.querySelector('.autoBtn');
+
+    if (!autoButton) return;
+
+    function clearAll() {
+      segmentButtons.forEach(button => button.classList.remove('active'));
+      autoButton.classList.remove('active');
+    }
+
+    async function setState(state) {
+      clearAll();
+
+      if (state === 'auto') {
+        autoButton.classList.add('active');
+      } else {
+        segmentButtons.forEach(button => {
+          if (button.dataset.seg === state) {
+            button.classList.add('active');
+          }
+        });
+      }
+
+      if (groupName === 'wiper' || groupName === 'high_beam') {
+        await sendMode(groupName, state);
+      }
+
+      updateCarFromUI();
+    }
+
+    segmentButtons.forEach(button => {
+      button.addEventListener('click', () => setState(button.dataset.seg));
+    });
+    autoButton.addEventListener('click', () => setState('auto'));
+
+    // 기본값 AUTO
+    clearAll();
+    autoButton.classList.add('active');
+  });
+
+  // ===== Left/Right/Emergency 클릭 =====
   if (leftButton) {
     leftButton.addEventListener('click', async () => {
       if (isHazardOn()) {
@@ -820,6 +847,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const wantOn = !leftButton.classList.contains('active');
       setTurnSignal(wantOn ? 'left' : 'off');
       await sendTurn(wantOn ? 'LEFT' : 'OFF');
+
+      updateCarFromUI();
     });
   }
 
@@ -833,6 +862,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const wantOn = !rightButton.classList.contains('active');
       setTurnSignal(wantOn ? 'right' : 'off');
       await sendTurn(wantOn ? 'RIGHT' : 'OFF');
+
+      updateCarFromUI();
     });
   }
 
@@ -841,9 +872,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       const nextOn = !emerButton.classList.contains('active');
       setHazard(nextOn);
       await sendTurn(nextOn ? 'HAZARD' : 'OFF');
+
+      updateCarFromUI();
     });
   }
 
+  // ===== pressed 효과 =====
   document.querySelectorAll('.iconCardBtn').forEach(button => {
     button.addEventListener('pointerdown', (event) => {
       event.preventDefault();
@@ -856,19 +890,94 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
     });
   });
 
-  document.querySelectorAll('.padBtn').forEach(button => {
-    button.addEventListener('pointerdown', (event) => {
-      event.preventDefault();
-      button.setPointerCapture(event.pointerId);
-      button.classList.add('pressed');
-    });
+  // ===== 서버 상태 동기화 =====
+  function normalizeMode(value){
+    const s = toLowerSafe(value);
+    if (s === 'on' || s === 'off' || s === 'auto') return s;
+    if (s === '1') return 'on';
+    if (s === '0') return 'off';
+    return 'auto';
+  }
 
-    ['pointerup', 'pointercancel', 'pointerleave'].forEach(eventName => {
-      button.addEventListener(eventName, () => button.classList.remove('pressed'));
-    });
-  });
+  function pickBool(obj, keys){
+    for (const key of keys){
+      if (obj && Object.prototype.hasOwnProperty.call(obj, key)){
+        return Boolean(obj[key]);
+      }
+    }
+    return null;
+  }
 
-  // [추가] 1초마다 서버 상태 동기화
+  async function refreshFromServer(){
+    try{
+      const r = await fetch('/api/state');
+      const j = await r.json();
+
+      // wiper/high_beam UI
+      const wiperGroup = document.querySelector('.controlGroup[data-group="wiper"]');
+      const highGroup  = document.querySelector('.controlGroup[data-group="high_beam"]');
+
+      let wiperMode = 'auto';
+      let highMode = 'auto';
+
+      if (wiperGroup) {
+        wiperMode = normalizeMode(j.wiper || j.wiper_mode || j.wiperMode || 'AUTO');
+        setGroupUI(wiperGroup, wiperMode);
+      }
+
+      if (highGroup) {
+        highMode = normalizeMode(j.high_beam || j.high || j.high_mode || j.highMode || 'AUTO');
+        setGroupUI(highGroup, highMode);
+      }
+
+      // turn UI
+      let turn = 'off';
+      if (typeof j.turn === 'string') {
+        const t = toLowerSafe(j.turn || 'OFF');
+        if (t === 'hazard' || t === 'emergency') {
+          turn = 'hazard';
+          setHazard(true);
+        } else {
+          setHazard(false);
+          if (t === 'left') {
+            turn = 'left';
+            setTurnSignal('left');
+          } else if (t === 'right') {
+            turn = 'right';
+            setTurnSignal('right');
+          } else {
+            turn = 'off';
+            setTurnSignal('off');
+          }
+        }
+      }
+
+      // 센서 표시
+      if (typeof j.temp === 'number') {
+        document.getElementById('tempText').textContent = j.temp.toFixed(1) + '°C';
+      }
+      if (typeof j.hum === 'number') {
+        document.getElementById('humText').textContent = j.hum.toFixed(1) + '%';
+      }
+      if (typeof j.cds === 'number') {
+        document.getElementById('cdsText').textContent = String(j.cds);
+      }
+
+      // "실제 동작" 점멸 플래그(있으면 사용, 없으면 모드=ON을 fallback)
+      const wiperActiveFromServer = pickBool(j, ['wiper_active','wiperActive','wiper_running','wiperRunning','wiper_on','wiperOn']);
+      const highActiveFromServer  = pickBool(j, ['high_active','highActive','high_running','highRunning','high_on','highOn','high_beam_on','highBeamOn']);
+
+      const wiperActive = (wiperActiveFromServer !== null) ? wiperActiveFromServer : (wiperMode === 'on');
+      const highActive  = (highActiveFromServer  !== null) ? highActiveFromServer  : (highMode  === 'on');
+
+      updateCarBlink({ turn, wiperActive, highActive });
+
+    } catch(e) {
+      // 네트워크 실패 시: 로컬 UI 기준으로라도 갱신
+      updateCarFromUI();
+    }
+  }
+
   refreshFromServer();
   setInterval(refreshFromServer, 1000);
 </script>
@@ -996,7 +1105,7 @@ static bool can_send_servo_speed(uint8_t speedLevel)
     tx.identifier = CAN_ID_CMD_SERVO;
     tx.flags = TWAI_MSG_FLAG_NONE;
     tx.data_length_code = 2;
-    tx.data[0] = SERVO_CMD_SET_ANGLE;
+    tx.data[0] = SERVO_CMD_SET_SPEED_LEVEL;
     tx.data[1] = speedLevel;
 
     esp_err_t result = twai_transmit(&tx, 10);
@@ -1142,35 +1251,89 @@ static void canPollSensors()
             break;
         }
 
+        /* 이 프로젝트는 STD ID만 사용 */
         if ((rxMessage.flags & TWAI_MSG_FLAG_EXTD) != 0) {
             continue;
         }
 
+        /* =========================
+         * DHT (CAN_DHT_ID = 0x100)
+         * - 지원 포맷(자동 판별):
+         *   1) DLC=8: float humidity(4B) + float temp(4B)  [LE]
+         *   2) DLC>=4: int16 humidity_x10(2B) + int16 temp_x10(2B) [LE]
+         *   3) DLC=2: uint8 humidity + uint8 temp
+         * ========================= */
         if (rxMessage.identifier == CAN_DHT_ID)
         {
-            if (rxMessage.data_length_code < 4) {
-                continue;
+            bool updated = false;
+
+            if (rxMessage.data_length_code == 8) {
+                float humidity = NAN;
+                float temperature = NAN;
+
+                memcpy(&humidity, &rxMessage.data[0], 4);
+                memcpy(&temperature, &rxMessage.data[4], 4);
+
+                if (isfinite(humidity) && isfinite(temperature)) {
+                    g_humidity = humidity;
+                    g_temperature = temperature;
+                    updated = true;
+                }
+            }
+            else if (rxMessage.data_length_code >= 4) {
+                int16_t humidity_x10 = (int16_t)((uint16_t)rxMessage.data[0] | ((uint16_t)rxMessage.data[1] << 8));
+                int16_t temp_x10     = (int16_t)((uint16_t)rxMessage.data[2] | ((uint16_t)rxMessage.data[3] << 8));
+
+                float humidity = ((float)humidity_x10) / 10.0f;
+                float temperature = ((float)temp_x10) / 10.0f;
+
+                /* 값이 말이 되면 적용(송신 측 포맷 혼선 방지) */
+                bool humidity_ok = (humidity >= 0.0f) && (humidity <= 100.0f);
+                bool temperature_ok = (temperature >= -40.0f) && (temperature <= 125.0f);
+                if (humidity_ok && temperature_ok) {
+                    g_humidity = humidity;
+                    g_temperature = temperature;
+                    updated = true;
+                }
+            }
+            else if (rxMessage.data_length_code == 2) {
+                uint8_t humidity = rxMessage.data[0];
+                uint8_t temperature = rxMessage.data[1];
+
+                g_humidity = (float)humidity;
+                g_temperature = (float)temperature;
+                updated = true;
             }
 
-            int16_t humidity_x10 = (int16_t)((uint16_t)rxMessage.data[0] | ((uint16_t)rxMessage.data[1] << 8));
-            int16_t temp_x10 = (int16_t)((uint16_t)rxMessage.data[2] | ((uint16_t)rxMessage.data[3] << 8));
-
-            g_humidity = ((float)humidity_x10) / 10.0f;
-            g_temperature = ((float)temp_x10) / 10.0f;
-            g_lastSensorUpdateMs = millis();
+            if (updated) {
+                g_lastSensorUpdateMs = millis();
+            }
             continue;
         }
 
+        /* =========================
+         * CDS (CAN_CDS_ID = 0x110)
+         * - 지원 포맷:
+         *   1) DLC>=2: uint16 adc [LE]
+         *   2) DLC=1 : uint8 adc
+         * ========================= */
         if (rxMessage.identifier == CAN_CDS_ID)
         {
-            if (rxMessage.data_length_code < 2) {
+            if (rxMessage.data_length_code >= 2) {
+                uint16_t cdsAdc12 = (uint16_t)((uint16_t)rxMessage.data[0] | ((uint16_t)rxMessage.data[1] << 8));
+                g_cdsAdc = cdsAdc12;
+                g_hasCds = true;
+                g_lastCdsUpdateMs = millis();
                 continue;
             }
 
-            uint16_t cdsAdc12 = (uint16_t)((uint16_t)rxMessage.data[0] | ((uint16_t)rxMessage.data[1] << 8));
-            g_cdsAdc = cdsAdc12;
-            g_hasCds = true;
-            g_lastCdsUpdateMs = millis();
+            if (rxMessage.data_length_code == 1) {
+                g_cdsAdc = (uint16_t)rxMessage.data[0];
+                g_hasCds = true;
+                g_lastCdsUpdateMs = millis();
+                continue;
+            }
+
             continue;
         }
     }
@@ -1287,7 +1450,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length)
 }
 
 /* =========================
- * 토픽 생성
+ * 토픽 생성 (정환님 기존 유지)
  * ========================= */
 static void build_device_id_from_mac()
 {
@@ -1319,7 +1482,7 @@ static void build_topics()
 }
 
 /* =========================
- * WiFi/MQTT connect
+ * WiFi/MQTT connect 
  * ========================= */
 static void wifi_connect()
 {
@@ -1339,7 +1502,9 @@ static void wifi_connect()
 static void mqtt_connect()
 {
     mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+    #if ENABLE_MQTT_COMMANDS
     mqttClient.setCallback(mqtt_callback);
+#endif
 
     while (mqttClient.connected() == false)
     {
@@ -1367,16 +1532,18 @@ static void mqtt_connect()
         delay(500);
     }
 
+#if ENABLE_MQTT_COMMANDS
     mqttClient.subscribe(g_topicWiperCmd);
     mqttClient.subscribe(g_topicHighBeamCmd);
     mqttClient.subscribe(g_topicHighCmdCompat);
+#endif
 
     mqttClient.publish(g_topicOnline, "online", true);
     mqtt_publish_state();
 }
 
 /* =========================
- * Web API
+ * Web API 
  * ========================= */
 static void web_handle_root()
 {
@@ -1405,12 +1572,13 @@ static void web_handle_state()
 
     json += "\"high\":\"";
     json += mode_to_string(g_highBeamMode);
-    json += "\"";
+    json += "\",";
 
-
-    json += ",\"turn\":\"";
+    json += "\"turn\":\"";
     json += turn_mode_to_string(g_turnMode);
     json += "\"";
+
+    /* 센서 값 */
     if (isnan(g_temperature) == false) {
         json += ",\"temp\":";
         json += String(g_temperature, 1);
@@ -1424,6 +1592,35 @@ static void web_handle_state()
     if (g_hasCds) {
         json += ",\"cds\":";
         json += String((unsigned)g_cdsAdc);
+    }
+
+    /* 액추에이터 현재(마지막 송신) 상태: UI 점멸 용 */
+    bool wiperActive = (g_lastSentSpeedLevel != 0xFF) && (g_lastSentSpeedLevel != kSpeedLevelStop);
+    bool highActive  = (g_lastSentHighBeamState != 0xFF) && (g_lastSentHighBeamState != 0);
+
+    json += ",\"wiper_active\":";
+    json += (wiperActive ? "true" : "false");
+    json += ",\"high_active\":";
+    json += (highActive ? "true" : "false");
+
+    if (g_lastSentSpeedLevel != 0xFF) {
+        json += ",\"wiper_speed_level\":";
+        json += String((unsigned)g_lastSentSpeedLevel);
+    }
+    if (g_lastSentHighBeamState != 0xFF) {
+        json += ",\"high_state\":";
+        json += String((unsigned)g_lastSentHighBeamState);
+    }
+
+    /* 센서 갱신 시각(디버그용) */
+    uint32_t nowMs = millis();
+    if (g_lastSensorUpdateMs != 0) {
+        json += ",\"dht_age_ms\":";
+        json += String((unsigned)(nowMs - g_lastSensorUpdateMs));
+    }
+    if (g_lastCdsUpdateMs != 0) {
+        json += ",\"cds_age_ms\":";
+        json += String((unsigned)(nowMs - g_lastCdsUpdateMs));
     }
 
     json += "}";
@@ -1520,11 +1717,9 @@ static void web_handle_turn()
     // OFF는 "이전 모드"에 따라 끄는 방식으로 토글 1번 더 보내줌
     if (oldMode == TURN_MODE_LEFT) {
         can_send_turn_pulse(TURN_DIR_LEFT);   // 토글 OFF
-    }
-    else if (oldMode == TURN_MODE_RIGHT) {
+    } else if (oldMode == TURN_MODE_RIGHT) {
         can_send_turn_pulse(TURN_DIR_RIGHT);  // 토글 OFF
-    }
-    else if (oldMode == TURN_MODE_HAZARD) {
+    } else if (oldMode == TURN_MODE_HAZARD) {
         can_send_hazard_set(false);
     }
 
@@ -1605,9 +1800,27 @@ static void controlLoopOnce()
     uint8_t desiredSpeedLevel = g_lastSentSpeedLevel;
     uint8_t desiredHighBeamState = g_lastSentHighBeamState;
 
+    /* 센서 신선도 체크 */
+    uint32_t nowMs = millis();
+
+    bool dhtFresh = (g_lastSensorUpdateMs != 0U) && ((nowMs - g_lastSensorUpdateMs) <= kSensorStaleMs);
+    bool cdsFresh = (g_lastCdsUpdateMs != 0U) && ((nowMs - g_lastCdsUpdateMs) <= kCdsStaleMs);
+
+    float humidityForAuto = g_humidity;
+    uint16_t cdsForAuto = g_cdsAdc;
+    bool hasCdsForAuto = g_hasCds;
+
+    if (dhtFresh == false) {
+        humidityForAuto = NAN; /* AUTO에서는 STOP으로 떨어짐 */
+    }
+
+    if (cdsFresh == false) {
+        hasCdsForAuto = false;
+    }
+
     /* WIPER */
     if (g_wiperMode == MODE_AUTO) {
-        desiredSpeedLevel = compute_wiper_speed_from_humidity(g_humidity);
+        desiredSpeedLevel = compute_wiper_speed_from_humidity(humidityForAuto);
     }
     else if (g_wiperMode == MODE_ON) {
         desiredSpeedLevel = kManualWiperOnSpeed;
@@ -1622,7 +1835,11 @@ static void controlLoopOnce()
 
     /* HIGH_BEAM */
     if (g_highBeamMode == MODE_AUTO) {
-        desiredHighBeamState = compute_high_beam_state_from_cds(g_cdsAdc, g_hasCds, g_lastSentHighBeamState);
+        uint8_t currentHighBeamState = g_lastSentHighBeamState;
+        if (currentHighBeamState == 0xFF) {
+            currentHighBeamState = 0U;
+        }
+        desiredHighBeamState = compute_high_beam_state_from_cds(cdsForAuto, hasCdsForAuto, currentHighBeamState);
     }
     else if (g_highBeamMode == MODE_ON) {
         desiredHighBeamState = 1U;
@@ -1639,7 +1856,7 @@ static void controlLoopOnce()
 
 
     /* 변경 시에만 송신 */
-    if (g_lastSentSpeedLevel != desiredSpeedLevel) {
+        if (g_lastSentSpeedLevel != desiredSpeedLevel) {
         bool ok = can_send_servo_speed(desiredSpeedLevel);
         if (ok) {
             g_lastSentSpeedLevel = desiredSpeedLevel;
@@ -1650,26 +1867,26 @@ static void controlLoopOnce()
         }
     }
 
-    if (g_lastSentHighBeamState != desiredHighBeamState) {
+        if (g_lastSentHighBeamState != desiredHighBeamState) {
         bool ok = can_send_high_beam_state(desiredHighBeamState);
         if (ok) {
             g_lastSentHighBeamState = desiredHighBeamState;
             Serial.printf("[TX] HIGH_BEAM state=%u (CDS=%u)\n",
                 (unsigned)g_lastSentHighBeamState,
                 (unsigned)g_cdsAdc);
+              }
         }
+
+
+  if (g_lastSentTurnMode != desiredTurnMode) {
+    uint8_t prevMode = g_lastSentTurnMode;
+
+    bool ok = send_turn_transition(prevMode, desiredTurnMode);
+    if (ok) {
+        g_lastSentTurnMode = desiredTurnMode;
+        Serial.printf("[TX] TURN mode=%s\n", turn_mode_to_string(g_lastSentTurnMode));
     }
-
-
-    if (g_lastSentTurnMode != desiredTurnMode) {
-        uint8_t prevMode = g_lastSentTurnMode;
-
-        bool ok = send_turn_transition(prevMode, desiredTurnMode);
-        if (ok) {
-            g_lastSentTurnMode = desiredTurnMode;
-            Serial.printf("[TX] TURN mode=%s\n", turn_mode_to_string(g_lastSentTurnMode));
-        }
-    }
+  }
 }
 
 void setup()
@@ -1700,44 +1917,44 @@ void setup()
 
 void loop()
 {
-    if (WiFi.status() != WL_CONNECTED) {
-        wifi_connect();
+  if (WiFi.status() != WL_CONNECTED) {
+      wifi_connect();
+  }
+
+  if (mqttClient.connected() == false) {
+      mqtt_connect();
+  }
+
+  mqttClient.loop();
+  webServer.handleClient();
+
+  canPollSensors();
+
+  /* 100ms마다 AUTO/수동 판단 + 필요한 명령 송신 */
+  static uint32_t lastControlMs = 0;
+  uint32_t nowMs = millis();
+  if ((nowMs - lastControlMs) >= 100) {
+      lastControlMs = nowMs;
+      controlLoopOnce();
+  }
+
+  /* 유실 대비 2초마다 현재 명령 재송신(선택) */
+  static uint32_t lastResendMs = 0;
+  if ((nowMs - lastResendMs) >= 2000) {
+    lastResendMs = nowMs;
+
+    if (g_lastSentSpeedLevel != 0xFF) {
+      if (can_send_servo_speed(g_lastSentSpeedLevel) == false) {
+      Serial.println("[CAN-TX-FAIL] resend SERVO");
+      }
     }
 
-    if (mqttClient.connected() == false) {
-        mqtt_connect();
+    if (g_lastSentHighBeamState != 0xFF) {
+      if (can_send_high_beam_state(g_lastSentHighBeamState) == false) {
+      Serial.println("[CAN-TX-FAIL] resend HIGH_BEAM");
+      }
     }
-
-    mqttClient.loop();
-    webServer.handleClient();
-
-    canPollSensors();
-
-    /* 100ms마다 AUTO/수동 판단 + 필요한 명령 송신 */
-    static uint32_t lastControlMs = 0;
-    uint32_t nowMs = millis();
-    if ((nowMs - lastControlMs) >= 100) {
-        lastControlMs = nowMs;
-        controlLoopOnce();
-    }
-
-    /* 유실 대비 2초마다 현재 명령 재송신(선택) */
-    static uint32_t lastResendMs = 0;
-    if ((nowMs - lastResendMs) >= 2000) {
-        lastResendMs = nowMs;
-
-        if (g_lastSentSpeedLevel != 0xFF) {
-            if (can_send_servo_speed(g_lastSentSpeedLevel) == false) {
-                Serial.println("[CAN-TX-FAIL] resend SERVO");
-            }
-        }
-
-        if (g_lastSentHighBeamState != 0xFF) {
-            if (can_send_high_beam_state(g_lastSentHighBeamState) == false) {
-                Serial.println("[CAN-TX-FAIL] resend HIGH_BEAM");
-            }
-        }
-    }
-
-    delay(5);
+  }
+  
+  delay(5);
 }

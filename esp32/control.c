@@ -15,14 +15,14 @@
 #define HIGH_OUTPUT_GPIO_PIN    GPIO_NUM_16
 
 /* 상태/램프 핀 */
-#define PIN_TURN_RIGHT          GPIO_NUM_18   /* Right (기존) */
-#define PIN_TURN_RIGHT_EXTRA    GPIO_NUM_27   /* Right (추가) */
+#define PIN_TURN_RIGHT          GPIO_NUM_22   /* Right (기존) */
+#define PIN_TURN_RIGHT_EXTRA    GPIO_NUM_26   /* Right (추가) */
 
 #define PIN_HIGH_INDICATOR_A    GPIO_NUM_19   /* High beam indicator */
 #define PIN_HIGH_INDICATOR_B    GPIO_NUM_21   /* High beam indicator */
 
-#define PIN_TURN_LEFT           GPIO_NUM_22   /* Left (기존) */
-#define PIN_TURN_LEFT_EXTRA     GPIO_NUM_26   /* Left (추가) */
+#define PIN_TURN_LEFT           GPIO_NUM_18   /* Left (기존) */
+#define PIN_TURN_LEFT_EXTRA     GPIO_NUM_27   /* Left (추가) */
 
 #define PIN_EMERGENCY_INDICATOR       GPIO_NUM_23   /* Emergency (기존) */
 #define PIN_EMERGENCY_INDICATOR_EXTRA GPIO_NUM_25   /* Emergency (추가) */
