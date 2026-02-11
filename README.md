@@ -1,162 +1,57 @@
-# SSAFY_2nd_Semester_First_PJT
-SSAFY 14기 공통 프로젝트
-
-### git 버전 관리 원칙
-1. 공통 개발 branch는 master 혹은 main 으로 하며, 개인별로 개발하는 환경은 로컬 branch로 한다.
-2. main 혹은 master branch 로 commit 하지 않고 로컬 branch로 commit 후 pull request 승인 받은 다음, merge 처리를 최우선 원칙으로 한다.
-3. commit 하기 전에 LOG 작성 후 진행한다.
+# **📜** 개요
 
 ---
-### Git LOG 작성 규칙
-1. 작성 폼은 다음과 같다.
 
-- (연도/월/일) 로그_순서. 이름[작업 결과]
-- 작업_내용
+# 프로젝트 명 : DFS(Drive Fusion System)
 
-ex) 
+![img](README_image/image1.png)
 
-(26/01/12) 01. 홍길동[구현 완료] 
-- README 작성
+### ⇒ CAN 네트워크 기반 전장 제어로 효율적으로 제어하고, 직관적인 인터페이스를 제공하는 차량 제어 플랫폼 설계
 
-(26/01/12) 02. 김철수[오류 발생] 
-- 구동부 후진 작동 이상 발생함
+# 📋 Architecture
 
-(26/01/13) 01. 김철수[오류 해결] 
-- **(26/01/12) 02** 의 구동부 후진 작동 오류 해결함.
-
-
-
-2. 작업 결과에는 구현 완료, 오류 발생, 오류 해결 등등 작성 가능하다.
-3. 작업 내용에는 직관적으로 작성한다.
-4. commit 하기 전에 LOG 작성 후 진행한다.
-5. 날짜가 지나고 나서 첫 push 일 때, 로그 순서는 1번부터 시작하며, push마다 차례로 올라간다.
 ---
-### GIT LOG
-(26/01/12) 01. 임정환[구현 완료] 
-- README 작성
-- GIT 버전 관리 규칙 설정
-- LOG 작성 규칙 설정
 
-(26/01/15) 01. 임정환[구현 완료] 
-- stm32(STM32F429I-DISC1) 환경 세팅 완료
-    1. 프로그램
-        -> IDE : STM32 CubeIDE, v1.9.0 (https://www.st.com/en/development-tools/stm32cubeide.html)
-        -> tool : STM32 CubeMX, v6.16.1 (https://www.st.com/en/development-tools/stm32cubemx.html)
+![img](README_image/image2.png)
 
-    2. 출력 테스트 확인을 위한 .ioc 세팅
-        -> usart1 ==> Asynchronous 로 설정
-        -> Project Manager -> Code Generator -> Generate files -> Generate Peripheral ... 체크
+### CAN
 
-- 출력 테스트를 위한 코드 작성 후 정상 작동 확인함.
+- 2개의 ESP32 ↔ STM32 통신을 효율적으로 구축하기 위해 사용
+    - FreeRTOS를 통해 중요한 데이터가 먼저 전송되도록 하여 실시간 성능을 보장
+    - 물리적 결함에 강한 네트워크 구조를 가지고 있어, 일부 노드의 장애가 전체 네트워크에 영향을 주지 않음
+    - BUS를 기반으로, 각 장치가 고유한 메시지 ID를 사용하여 통신하기 때문에 시스템 확장이 용이함
 
-(26/01/19) 01. 임정환[구현 완료] 
-- ESP32 개발 환경 설정
-    1. Arduino IDE v.2.3.7 설치
-    2. ESP32 DEV Module 설정 (필요시 드라이버 다운)
+### **MQTT**
 
-- DHT11 테스트 완료
-    1. DATA 핀은 ESP32 GPIO16 번에 연결
-    2. V_DD = 3.3V
-    3. 라이브러리 "DHT sensor library" by Adafruit 를 설치함.
+- 와이파이 환경을 위한 무선 통신 연결을 위해 사용
+    - 외부 서버에 접근 후 인터넷을 활용해 UI/UX를 출력
+    - 전송하는 데이터는 Flag 신호이므로 가벼운 MQTT 프로토콜 사용
 
-(26/01/20) 01. 임정환[구현 완료] 
-- ESP32 끼리 CAN통신 연결 성공
-1. 하나는 DHT11 연결해서 송신하고, 나머지는 수신함
-2. RX => GPIO32, TX => GPIO33 으로 연결
+### **SPI**
 
-(26/01/21) 01. 임정환[구현 완료] 
-- STM32 <=> ESP32 CAN통신 연결 성공
-1. Polling 방식이며, Inturrupt 방식으로 변환 필요함
-2. ESP32 코드는 그대로 유지함
-3. STM32 .ioc 설정은 다음과 같다.
-    - Connenctivity CAN1을 Activated
-    - 그 다음, Parameter Settings에서 다음과 같다. (Baud Rate => 500,000 bit/s 목적)
-        - Prescaler = 2
-        - Time Quanta in Bit Segment 1(줄여서 a.k.a TQ) = 11
-        - TQ2 = 4
+- 신뢰성과 전송 속도가 빠른 유선 통신 프로토콜 사용
 
-    - PA11 = Rx, PA12 = Tx
+### Operation Policy
 
-(26/01/22) 01. 임정환[구현 완료] 
-1. ESP32 에서 control.c로 서보모터 구현함.
-    - 습도를 기준으로 돌아가며, 30, 35, 40도 기준으로 습도가 올라갈 수록 모터 속도도 빨라짐.
-    - STM32에서 각도 대신 Level 값으로 받으며, 0일 때는 30도 미만일 때로, 정지 
-    - 서보 모터는 5V, GPIO 17번으로 지정했다.
+- 개발 통합 정책을 설정하고, 이를 통해 통신 프로토콜, 보안, 로그 등을 통일
 
-2. STM32의 동작 구조를 FreeRTOS로 구현함.
-    - CMSIS_V2로 실행함
-        1. 우선 순위를 "1. 레벨 값 전송, 2. 데이터 처리, 3. 송신 데이터 인터럽트 처리" 로 정했다.
+# 📃 Specification
 
-    - 센서 데이터를 인터럽트 방식으로 받으며, 이에 따라 제어를 판단하여 control에다 신호를 전송한다. 서보 모터는 레벨 데이터를 전송하여 30도일때 Level1, 35 = level2, 이런 식으로 순차적으로 전송한다.
+---
 
-3. STM32의 전체 코드를 push함
+1. **센서**
+    - DHT11 및 CDS 센서 값 Read 후 CAN 통신을 통해 STM32에 전송
+2. **통신**
+    - STM32로부터 센서 데이터를 받아 SPI 통신을 통해 MQTT ESP32에 데이터 전송
+    - HTML을 외부 Web Server에다 구축하고 개인 토픽 설정
+    - 웹에서의 요청에 따라 MQTT ESP32 → STM32으로 SPI 통신을 통해 명령 전송
+3. **사용자 UI**
+    - HTML을 활용한UI/UX 기반의 원격 제어 설계
+    - 실시간으로 측정된 센서 값을 UI에 표시
+4. **제어**
+    - 수동 제어 : MQTT ESP32의 차량 제어 명령에 따라 우선적인 차량 구동 제어
+    - 자동 제어 : 실시간 센서 데이터에 따라 상향등, 와이퍼 제어 기능
 
-(26/01/23) 01. 임정환[구현 완료] 
-1. MQTT 통신 설정 완료
-- 개인 핫스팟으로 태블릿 <=> ESP32 보드 연결 성공함
-- wifi ID, PW 환경마다 수정 필요
-- LED를 ESP32 GPIO 27번에다 연결하였으며, ON, OFF 메시지로 제어함.
-    1. ON -> LED가 켜짐
-    2. OFF -> LED가 꺼짐
+### ※ UI/UX
 
-2. 실행 방법
-- ESP32 보드에다 업로드 성공하면, 시리얼 모니터에 WiFi connented 옆에 ip가 뜸.
-(ex. WiFi connected. 10.95.150.27)
-- URL을 인터넷에 "http://ip번호" 작성 후 접속. 그럼 mqtt.c 파일 안에 있는 html이 열림.
-- 인터넷 연결 확인 후, ON, OFF 버튼 눌러서 확인할 것.
-
-(26/01/30) 01. 임정환[구현 실패] 
-- SPI1 통신 설정은 다음과 같다.
-    1. PA4 - ESP32_SPI_CS
-    2. PA5 - ESP32_SPI_SCK
-    3. PA6 - ESP32_SPI_MISO
-    4. PA7 - ESP32_SPI_MOSI
-    5. SPI1 - global interrupt Enabled 실행
-    6. 그 외의 값들은 Default
-
-- FREERTOS 설정은 사진을 참고해서 설정한다 (freertos.c 참고).
-![alt text](image.png)
-![alt text](image-1.png)
-
-- 현재 상황
-    1. MQTT 로 태블릿과 mqtt 보드 연결 완료
-    2. stm32와 센서, 동작부 연결 완료
-    3. mqtt가 auto flag를 전송하면, freertos를 통해 자동적으로 동작하는 알고리즘 실행
-    4. mqtt가 On, Off flag를 전송하면 우선적으로 동작하도록 설계했음.
-    5. stm32에서 센서 데이터 받아오는 것을 로그로 확인함
-    6. mqtt html에서 동작 flag(On, Off, AUTO로 변경했는지 확인하는 로그)가 제대로 출력됨을 확인함
-
-- 확인 필요한 상황
-1. mqtt 보드와 stm32 간의 통신 확인 필요
-
-(26/02/01) 01. 임정환[구현 성공] 
-- ESP32 끼리 CAN 통신 완료
-    1. GPIO 선 정리
-        DHT - 16
-        servo_motor - 17
-        CAN_RX - 32
-        CAN_TX - 33
-
-(26/02/03) 01. 임정환[구현 성공] 
-- ESP32 끼리 Target Git 구현 완료
-    1. send GPIO 
-    DHT - 16
-    CDS - 34
-
-    2. control GPIO
-    servo_motor - 17
-    Left LED - 18
-    Right LED - 22
-    High beam LED - 19, 21
-    Back LED - 23
-    
-    3. Common GPIO
-    CAN_RX - 32
-    CAN_TX - 33
-
-(26/02/03) 02. 임정환[구현 성공] 
-- Right, Left, back led 추가
-
-(26/02/06) 01. 임정환[동작 개선] 
-- GUI 개선
-- Right, Left 방향 오작동 개선
+![img](README_image/image3.png)
