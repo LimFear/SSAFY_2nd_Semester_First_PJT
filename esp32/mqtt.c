@@ -9,14 +9,14 @@
 /* =========================
  * WiFi / MQTT 설정
  * ========================= */
-static const char* WIFI_SSID = "e^(ix) = k cosx + ki sinx, k = ?";
-static const char* WIFI_PASS = "haha5123";
+static const char* WIFI_SSID = "YOUR_ID";
+static const char* WIFI_PASS = "YOUR_PASSWORD";
 
 static const char* MQTT_HOST = "broker.emqx.io";
 static const uint16_t MQTT_PORT = 1883;
 
 /* 토픽 베이스 */
-static const char* TOPIC_BASE = "Lim/haha5123/esp32";
+static const char* TOPIC_BASE = "YOUR_TOPIC";
 
 /* =========================
  * 옵션
