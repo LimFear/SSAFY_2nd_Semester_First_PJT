@@ -1,0 +1,48 @@
+# Created by https://www.toptal.com/developers/gitignore/api/venv
+# Edit at https://www.toptal.com/developers/gitignore?templates=venv
+
+### venv ###
+# Virtualenv
+# http://iamzed.com/2009/05/07/a-primer-on-virtualenv/
+.Python
+[Bb]in
+[Ii]nclude
+[Ll]ib
+[Ll]ib64
+[Ll]ocal
+[Ss]cripts
+pyvenv.cfg
+.venv
+pip-selfcheck.json
+
+# End of https://www.toptal.com/developers/gitignore/api/venv
+
+
+# STM32CubeIDE
+.metadata/
+.settings/
+Debug/
+Release/
+*.launch
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy Documentation & Logs
+data_interface(v1.0).md
+data_interface(v2.0).md
+README_for_integration.md
+development_log.md
+operation_policy(v2.2).md
+retrospective.md
+project_history_summary.md
+
+# [Whitelist Rule] Only keep final project files and summaries
+# (Other files will be ignored)
+/*
+!README.md
+!data_interface(v2.1).md
+!esp32/
+!stm32/
+!.gitignore
